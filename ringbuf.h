@@ -26,8 +26,11 @@
 
 #include <pthread.h>
 
+#define RINGBUF_FLAG_RELATIVE (1 << 0)
+#define RINGBUF_FLAG_BLOCKING (1 << 1)
+
 struct ringbuf {
-    bool relative;
+    uint8_t flags;
     size_t size;
     uint8_t *start; // abs. addr of data buffer (used if relative=false)
     intptr_t offset; // offset of the data buffer ptr from this struct (used if relative=true)
@@ -41,10 +44,9 @@ struct ringbuf {
     volatile bool kill_thread;
 };
 
-void ringbuf_init(struct ringbuf *rb, void *start, size_t size, bool relative);
+void ringbuf_init(struct ringbuf *rb, void *start, size_t size, uint8_t flags);
 bool ringbuf_write(struct ringbuf *rb, void *data, size_t size);
 bool ringbuf_read(struct ringbuf *rb, void *out, size_t size);
-bool ringbuf_read_blocking(struct ringbuf *rb, void *out, size_t size);
 int  ringbuf_get_eventfd(struct ringbuf *rb);
 void ringbuf_clear_eventfd(struct ringbuf *rb);
 

@@ -46,9 +46,9 @@ size_t ringbuf_available(struct ringbuf *rb) {
     return rb->size - ringbuf_free_space(rb);
 }
 
-void ringbuf_init(struct ringbuf *rb, void *start, size_t size, bool relative) {
-    rb->relative = relative;
-    rb->offset = relative ? (uint8_t *)start - (uint8_t *)rb : 0;
+void ringbuf_init(struct ringbuf *rb, void *start, size_t size, uint8_t flags) {
+    rb->flags = flags;
+    rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
     rb->size = size;
     rb->start = start;
 
@@ -59,7 +59,7 @@ void ringbuf_init(struct ringbuf *rb, void *start, size_t size, bool relative) {
 
 bool ringbuf_write(struct ringbuf *rb, void *data, size_t size) {
     bool res;
-    void *real_start = rb->relative ? ((uint8_t *)rb + rb->offset) : rb->start;
+    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
     size_t space_left = ringbuf_free_space(rb);
     if (space_left < size) {
         res = false;
@@ -100,8 +100,14 @@ done:
 }
 
 bool ringbuf_read(struct ringbuf *rb, void *out, size_t size) {
+    // If this rb is blocking, wait for data
+    if (rb->flags & RINGBUF_FLAG_BLOCKING) {
+        while (ringbuf_available(rb) < size)
+            usleep(1);
+    }
+
     bool res;
-    void *real_start = rb->relative ? ((uint8_t *)rb + rb->offset) : rb->start;
+    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
     if (ringbuf_capacity(rb) - ringbuf_free_space(rb) < size) {
         res = false;
         goto done;
@@ -138,14 +144,6 @@ bool ringbuf_read(struct ringbuf *rb, void *out, size_t size) {
 done:
     return res;
 }
-
-bool ringbuf_read_blocking(struct ringbuf *rb, void *out, size_t size) {
-    while (ringbuf_available(rb) < size)
-        usleep(1);
-
-    return ringbuf_read(rb, out, size);
-}
-
 
 static void *_eventfd_thread_handler(void *_rb) {
     struct ringbuf *rb = _rb;

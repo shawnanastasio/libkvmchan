@@ -34,6 +34,8 @@
 
 #undef LIBKVMCHAN_TEST
 
+#define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
+
 void test_ringbufs(libkvmchan_t *chan);
 
 // A private data structure present at the beginning of all libkvmchan
@@ -67,8 +69,8 @@ static bool host_initialize(libkvmchan_t *chan, void *mem, size_t size) {
     void *data_base = (uint8_t *)mem + 0x1000;
     size_t rb_size = (size - 0x1000) / 2;
 
-    ringbuf_init(&hdr->host_to_client_rb, data_base, rb_size, true);
-    ringbuf_init(&hdr->client_to_host_rb, data_base + rb_size, rb_size, true);
+    ringbuf_init(&hdr->host_to_client_rb, data_base, rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
+    ringbuf_init(&hdr->client_to_host_rb, data_base + rb_size, rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
 
 #ifdef LIBKVMCHAN_TEST
     test_ringbufs(chan);
@@ -148,7 +150,7 @@ libkvmchan_t *libkvmchan_client_open(const char *devname) {
         goto fail_malloc;
     }
     char path_buf[300];
-    snprintf(path_buf, 300, "/sys/class/uio/%s/maps/map1/size", devname);
+    snprintf(path_buf, ARRAY_SIZE(path_buf), "/sys/class/uio/%s/maps/map1/size", devname);
     int size_fd = open(path_buf, O_RDONLY);
     if (size_fd < 0)
         goto fail_malloc;
@@ -174,7 +176,7 @@ libkvmchan_t *libkvmchan_client_open(const char *devname) {
     // Finally we have a size. Map region 1 of the uio device and return.
     // To map region N, an offset of N * getpagesize() must be passed as an mmap offset.
     // For more information, see the linux UIO documentation.
-    snprintf(path_buf, 300, "/dev/%s", devname);
+    snprintf(path_buf, ARRAY_SIZE(path_buf), "/dev/%s", devname);
     int uio_fd = open(path_buf, O_RDWR);
     if (uio_fd < 0)
         goto fail_open_size;
@@ -228,9 +230,9 @@ bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
 bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size) {
     shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
-        return ringbuf_read_blocking(&shmem->client_to_host_rb, out, size);
+        return ringbuf_read(&shmem->client_to_host_rb, out, size);
     } else {
-        return ringbuf_read_blocking(&shmem->host_to_client_rb, out, size);
+        return ringbuf_read(&shmem->host_to_client_rb, out, size);
     }
 }
 

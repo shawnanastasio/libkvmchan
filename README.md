@@ -3,7 +3,7 @@ libkvmchan
 libkvmchan is a library for sending data across shared memory channels like [KVM's ivshmem](https://github.com/qemu/qemu/blob/master/docs/specs/ivshmem-spec.txt).
 
 It is meant to implement a subset of the functionality provided by [Xen's libvchan](https://www.cs.uic.edu/~xzhang/vchan/#x1-20002).
-As of now, only blocking, streaming-based communication is supported.
+As of now, only blocking, packet-based communication is supported.
 
 Overview
 -----
