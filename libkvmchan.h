@@ -1,5 +1,5 @@
 /**
- * Copyright 2018 Shawn Anastasio
+ * Copyright 2018-2019 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -28,20 +28,19 @@
 
 #define LIBKVM_FLAG_HOST (1 << 0)
 
-typedef struct libkvmchan {
-    // flags. See LIBKVM_FLAG_*
-    uint32_t flags;
+// A handle to an opened shared memory region.
+typedef struct libkvmchan_shm_handle {
+    void *shm; // Raw pointer to virtual memory region
+    size_t size; // Size of memory region
+} libkvmchan_shm_handle_t;
 
-    // mmap'd memory region that is shared between host/client
-    void *shm;
+// Struct representing an open libkvmchan instance. Opaque to user.
+typedef struct libkvmchan libkvmchan_t;
 
-    // size of shared memory region
-    size_t shm_size;
-} libkvmchan_t;
-
-
-LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_host_open(const char *name);
-LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_client_open(const char *devname);
+LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_posix(libkvmchan_shm_handle_t *handle, const char *name);
+LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_uio(libkvmchan_shm_handle_t *handle, const char *devname);
+LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle);
+LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle);
 LIBKVMCHAN_EXPORTED bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size);
 LIBKVMCHAN_EXPORTED bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size);
 LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(libkvmchan_t *chan);

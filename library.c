@@ -1,5 +1,5 @@
 /**
- * Copyright 2018 Shawn Anastasio
+ * Copyright 2018-2019 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -32,128 +32,90 @@
 #include "libkvmchan.h"
 #include "ringbuf.h"
 
-#undef LIBKVMCHAN_TEST
-
-#define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
-
-void test_ringbufs(libkvmchan_t *chan);
+#define ARRAY_SIZE(x) (sizeof((x))/ sizeof(*(x)))
 
 // A private data structure present at the beginning of all libkvmchan
 // shared memory objects.
 #define SHMEM_MAGIC 0xDEADBEEFCAFEBABA
 typedef struct shmem_hdr {
     uint64_t magic;
-    struct ringbuf host_to_client_rb;
-    struct ringbuf client_to_host_rb;
+    ringbuf_t host_to_client_rb;
+    ringbuf_t client_to_host_rb;
 } shmem_hdr_t;
 
 
-// Private. Initializes a shared memory object as a part of the host init process.
-static bool host_initialize(libkvmchan_t *chan, void *mem, size_t size) {
-    // Initialize the libkvmchan_t
-    chan->flags = LIBKVM_FLAG_HOST;
-    chan->shm = mem;
-    chan->shm_size = size;
+// Main struct. Users only get opaque pointers.
+typedef struct libkvmchan {
+    // flags. See LIBKVM_FLAG_*
+    uint32_t flags;
 
-    // Write a shmem header object
-    shmem_hdr_t *hdr = chan->shm;
-    hdr->magic = SHMEM_MAGIC;
+    // pointer to memory region that is shared between host/client
+    void *shm;
 
-    // Determine positions and sizes of ringbuffers.
-    // Reserve first 0x1000 for header. The rest is split in half
-    // for each ringbuffer. Assume 0x1000 per ringbuffer is needed.
-    if (size < 0x1000 + (0x1000 * 2)) {
-        errno = ENOMEM;
-        return false;
-    }
-    void *data_base = (uint8_t *)mem + 0x1000;
-    size_t rb_size = (size - 0x1000) / 2;
+    // size of shared memory region
+    size_t shm_size;
 
-    ringbuf_init(&hdr->host_to_client_rb, data_base, rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
-    ringbuf_init(&hdr->client_to_host_rb, data_base + rb_size, rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
-
-#ifdef LIBKVMCHAN_TEST
-    test_ringbufs(chan);
-#endif
-
-    return true;
-}
-
+    // Ringbuffer security contexts
+    ringbuf_sec_context_t *host_to_client_sec;
+    ringbuf_sec_context_t *client_to_host_sec;
+} libkvmchan_t;
 
 /**
- * Establishes a libkvmchan shared memory host using the given
- * POSIX shared memory name.
- *
- * Note that a host must be established before clients attempt to connect.
+ * Get a handle to a POSIX shared memory region.
  *
  * Sets errno on failure.
  *
- * @param name POSIX shared memory name, must begin with a /
- * @return A libkvmchan_t struct, or NULL on error
+ * @param handle handle struct to populate on success
+ * @param name POSIX shared memory object name, must begin with a /
+ * @return success?
  */
-libkvmchan_t *libkvmchan_host_open(const char *name) {
-    // Allocate a libkvmchan_t structure
-    libkvmchan_t *chan = malloc(sizeof(libkvmchan_t));
-    if (!chan)
-        goto fail;
-
+bool libkvmchan_shm_open_posix(libkvmchan_shm_handle_t *handle, const char *name) {
     // Attempt to open the shm object whose name was passed to us
     int shm_fd = shm_open(name, O_RDWR, 0);
     if (shm_fd < 0)
-        goto fail_malloc;
+        goto fail;
 
     // Determine the size and mmap it
     struct stat shm_stat;
     if (fstat(shm_fd, &shm_stat) < 0)
         goto fail_shm_open;
-
     void *mem = mmap(NULL, shm_stat.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (mem == (void *)-1)
         goto fail_shm_open;
 
-    // Init kvmchan struct and return
-    if (!host_initialize(chan, mem, shm_stat.st_size))
-        goto fail_mmap;
+    // Populate handle
+    handle->shm = mem;
+    handle->size = shm_stat.st_size;
+    return true;
 
-    return chan;
-
-fail_mmap:
-    munmap(mem, shm_stat.st_size);
 fail_shm_open:
     close(shm_fd);
-fail_malloc:
-    free(chan);
 fail:
-    return NULL;
+    return false;
 }
 
 /**
- * Establishes a libkvmchan shared memory client using the given uio device.
- *
- * Note that a host must be established before clients attempt to connect.
+ * Get a handle to an ivshmem-uio shared memory region.
+ * See: https://github.com/shawnanastasio/ivshmem-uio
  *
  * Sets errno on failure.
  *
- * @param devname uio device name. Should correspond to a chardev in /dev. Ex. "uio0"
- * @return A libkvmchan_t struct, or NULL on error
+ * @param handle  handle struct to populate on success
+ * @param devname uio device name. Generally "uio0"
+ * @return success?
  */
-libkvmchan_t *libkvmchan_client_open(const char *devname) {
-    // Allocate libkvmchan_t struct
-    libkvmchan_t *ret = malloc(sizeof(libkvmchan_t));
-    if (!ret)
-        goto fail;
-
+bool libkvmchan_shm_open_uio(libkvmchan_shm_handle_t *handle, const char *devname) {
     // The ivshmem uio driver places the shared memory region in map 1 of the uio device.
     // Attempt to read map1's size from the file at /sys/class/uio/<devname>/maps/map1/size
     if (strlen(devname) > 255) {
         errno = EINVAL;
-        goto fail_malloc;
+        goto fail;
     }
     char path_buf[300];
     snprintf(path_buf, ARRAY_SIZE(path_buf), "/sys/class/uio/%s/maps/map1/size", devname);
     int size_fd = open(path_buf, O_RDONLY);
     if (size_fd < 0)
-        goto fail_malloc;
+        goto fail;
 
     // Read in the size as a string as a 64bit hex value prefixed with 0x
     char size_buf[19]; // "0x", 16 hexadecimal digits, null terminator
@@ -184,17 +146,138 @@ libkvmchan_t *libkvmchan_client_open(const char *devname) {
     if (mem == (void *)-1)
         goto fail_open_uio;
 
-    ret->flags = 0;
-    ret->shm = mem;
-    return ret;
+
+    // Fill in the handle struct and return
+    handle->shm = mem;
+    handle->size = size;
+    return true;
 
 fail_open_uio:
     close(uio_fd);
 fail_open_size:
     close(size_fd);
-fail_malloc:
-    free(ret);
 fail:
+    return false;
+}
+
+/**
+ * Establishes a libkvmchan shared memory host using the given
+ * libkvmchan_shm_handle_t.
+ *
+ * Note that a host must be established before clients attempt to connect.
+ *
+ * Sets errno on failure.
+ *
+ * @param handle An initialized libkvmchan_shm_handle_t. See libkvmchan_shm_open_* functions.
+ * @return A libkvmchan_t struct, or NULL on error
+ */
+libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
+    // Allocate a libkvmchan_t structure
+    libkvmchan_t *chan = malloc(sizeof(libkvmchan_t));
+    if (!chan)
+        goto fail;
+
+    // Init kvmchan struct and return
+    chan->flags = LIBKVM_FLAG_HOST;
+    chan->shm = handle->shm;
+    chan->shm_size = handle->size;
+
+    // Write a shmem header object
+    shmem_hdr_t *hdr = chan->shm;
+    hdr->magic = SHMEM_MAGIC;
+
+    // Determine positions and sizes of ringbuffers.
+    // Reserve first 0x1000 for header. The rest is split in half
+    // for each ringbuffer. Assume 0x1000 per ringbuffer is needed.
+    if (chan->shm_size < 0x1000 + (0x1000 * 2)) {
+        errno = ENOMEM;
+        goto fail_malloc;
+    }
+    void *data_base = (uint8_t *)chan->shm + 0x1000;
+    size_t rb_size = (chan->shm_size - 0x1000) / 2;
+
+    ringbuf_ret_t
+    rret = ringbuf_init(&hdr->host_to_client_rb, data_base, rb_size,
+                        RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING, &chan->host_to_client_sec);
+    if (rret != RB_SUCCESS) {
+        errno = ENOMEM;
+        goto fail_malloc;
+    }
+
+    rret = ringbuf_init(&hdr->client_to_host_rb, data_base + rb_size, rb_size,
+                        RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING, &chan->client_to_host_sec);
+    if (rret != RB_SUCCESS) {
+        errno = ENOMEM;
+        goto fail_malloc;
+    }
+
+    return chan;
+
+fail_malloc:
+    free(chan);
+fail:
+    return NULL;
+}
+
+
+/**
+ * Establishes a libkvmchan shared memory client using the given
+ * libkvmchan_shm_handle_t.
+ *
+ * Note that a host must be established before clients attempt to connect.
+ *
+ * Sets errno on failure.
+ *
+ * @param handle An initialized libkvmchan_shm_handle_t. See libkvmchan_shm_open_* functions.
+ * @return A libkvmchan_t struct, or NULL on error
+ */
+libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
+    ringbuf_ret_t rret;
+
+    // Allocate libkvmchan_t struct
+    libkvmchan_t *ret = malloc(sizeof(libkvmchan_t));
+    if (!ret)
+        return NULL;
+
+    // Init libkvmchan_t and return
+    ret->flags = 0;
+    ret->shm = handle->shm;
+    ret->shm_size = handle->size;
+
+    shmem_hdr_t *hdr = ret->shm;
+
+    // Create a reference struct for each ring buffer.
+    // Since we know what parameters the ringbufs should have, we can validate the
+    // fields.
+    intptr_t data_base = (intptr_t)((uint8_t *)ret->shm + 0x1000);
+    size_t rb_size = (ret->shm_size - 0x1000) / 2;
+
+    // host_to_client security context
+    rret = ringbuf_sec_infer_context(&hdr->host_to_client_rb,
+                                     RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING,
+                                     rb_size, data_base - (intptr_t)&hdr->host_to_client_rb,
+                                     &ret->host_to_client_sec);
+    if (rret != RB_SUCCESS)
+        goto fail;
+
+
+    // client_to_host security context
+    rret = ringbuf_sec_infer_context(&hdr->client_to_host_rb,
+                                     RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING,
+                                     rb_size, (data_base + rb_size) - (intptr_t)&hdr->client_to_host_rb,
+                                     &ret->client_to_host_sec);
+    if (rret != RB_SUCCESS)
+        goto fail;
+
+    return ret;
+fail:
+    if (rret == RB_OOM)
+        errno = ENOMEM;
+    else if (rret == RB_SEC_FAIL)
+        errno = EPERM;
+    else
+        errno = EINVAL;
+
     return NULL;
 }
 
@@ -210,10 +293,10 @@ bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
     shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
         // Use host_to_client ringbuffer
-        return ringbuf_write(&shmem->host_to_client_rb, data, size);
+        return ringbuf_write_sec(chan->host_to_client_sec, data, size) == RB_SUCCESS;
     } else {
         // Use client_to_host ringbuffer
-        return ringbuf_write(&shmem->client_to_host_rb, data, size);
+        return ringbuf_write_sec(chan->client_to_host_sec, data, size) == RB_SUCCESS;
     }
 }
 
@@ -230,9 +313,9 @@ bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
 bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size) {
     shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
-        return ringbuf_read(&shmem->client_to_host_rb, out, size);
+        return ringbuf_read_sec(chan->client_to_host_sec, out, size) == RB_SUCCESS;
     } else {
-        return ringbuf_read(&shmem->host_to_client_rb, out, size);
+        return ringbuf_read_sec(chan->host_to_client_sec, out, size) == RB_SUCCESS;
     }
 }
 
