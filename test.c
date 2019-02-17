@@ -1,99 +1,337 @@
-#include "libkvmchan.h"
-
+#include <stdint.h>
 #include <string.h>
-#include <stdio.h>
-#include <assert.h>
+#include <stdlib.h>
 
-#include <fcntl.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
 
+#include <check.h>
+
+#include "libkvmchan.h"
 #include "ringbuf.h"
 
-typedef struct shmem_hdr {
-    uint64_t magic;
-    ringbuf_t host_to_client_rb;
-    ringbuf_t client_to_host_rb;
-} shmem_hdr_t;
+// If we're using GCC/Clang, we can take advantage of the cleanup attribute
+// to automatically free memory used during tests.
+#ifdef __GNUC__
+void cleanup_free(void *val_) {
+    void **val = (void **)val_;
+    free(*val);
+}
+#define __auto_free __attribute__((__cleanup__(cleanup_free)))
+#else
+// Just leak... This is fine for a short-lived test program such as this.
+#define __auto_free
+#endif
 
-
-// Main struct. Users only get opaque pointers.
-typedef struct libkvmchan {
-    // flags. See LIBKVM_FLAG_*
-    uint32_t flags;
-
-    // pointer to memory region that is shared between host/client
-    void *shm;
-
-    // size of shared memory region
-    size_t shm_size;
-
-    // Ringbuffer security contexts
-    ringbuf_sec_context_t *host_to_client_sec;
-    ringbuf_sec_context_t *client_to_host_sec;
-} libkvmchan_t;
-
-
-char TEST_STR[] = "Hello, World! This is a test string.";
-
-void *server_thread(void *handle) {
-    libkvmchan_t *chan = libkvmchan_host_open(handle);
-    if (!chan) {
-        perror("libkvmchan_host_open");
-        return NULL;
-    }
-
-    for(;;) {
-        // Send a string and sleep for a second
-        if (!libkvmchan_write(chan, TEST_STR, sizeof(TEST_STR))) {
-            fprintf(stderr, "Failed to write test str! Buffer full?\n");
+uint8_t *get_random_bytes(size_t num) {
+    uint8_t *buf = malloc(num);
+    static int fd = -1;
+    if (fd < 0) {
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) {
+            free(buf);
+            return NULL;
         }
-        usleep(1000 * 1000);
     }
+
+    return read(fd, buf, num) > 0 ? buf : NULL;
+}
+
+
+// Test patterns
+static const uint8_t test_pattern_10[10] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBA, 0xF0, 0x0F};
+
+/// ringbuf:io tests
+
+// Make sure the ring buffer denies writes that are too big
+START_TEST(ringbuf_overflow_test) {
+    ringbuf_t rb;
+    __auto_free uint8_t *rb_buf = malloc(1000);
+    ck_assert_ptr_nonnull(rb_buf);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0, NULL) == RB_SUCCESS);
+
+    // Get 1001 random bytes and try to write to the buffer
+    __auto_free uint8_t *rand_buf = get_random_bytes(1001);
+    ck_assert_ptr_nonnull(rand_buf);
+    ck_assert(ringbuf_write(&rb, rand_buf, 1001) == RB_NOSPACE);
+}
+END_TEST
+
+// Make sure the ring buffer denies writes once it's full
+START_TEST(ringbuf_nospace_test) {
+    ringbuf_t rb;
+    __auto_free uint8_t *rb_buf = malloc(1000);
+    ck_assert_ptr_nonnull(rb_buf);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0, NULL) == RB_SUCCESS);
+
+    // Get 1000 random bytes and write to the buffer
+    __auto_free uint8_t *rand_buf = get_random_bytes(1000 + 1 /* 1 is used later */);
+    ck_assert_ptr_nonnull(rand_buf);
+    ck_assert(ringbuf_write(&rb, rand_buf, 1000) == RB_SUCCESS);
+
+    // Now that the buffer is full, assert that we can't write to it
+    ck_assert(ringbuf_write(&rb, rand_buf, 1) == RB_NOSPACE);
+
+    // Read the bytes back and ensure that nothing got corrupted
+    __auto_free uint8_t *tmp_buf = malloc(1000);
+    ck_assert_ptr_nonnull(tmp_buf);
+    ck_assert(ringbuf_read(&rb, tmp_buf, 1000) == RB_SUCCESS);
+    ck_assert(memcmp(tmp_buf, rand_buf, 1000) == 0);
+
+    // Make sure a write for 1001 bytes will fail
+    ck_assert(ringbuf_write(&rb, rand_buf, 1001) == RB_NOSPACE);
+
+    // Make sure a write for 1000 bytes will still succeed
+    ck_assert(ringbuf_write(&rb, rand_buf, 1000) == RB_SUCCESS);
+}
+END_TEST
+
+// Test writes that wrap from the end to the front of the buf
+START_TEST(ringbuf_write_wrap_test) {
+    ringbuf_t rb;
+    __auto_free uint8_t *rb_buf = malloc(1000);
+    ck_assert_ptr_nonnull(rb_buf);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0, NULL) == RB_SUCCESS);
+
+    // Write a byte and read it back to offset the start pointer by 2
+    const uint8_t test_bytes[2] = {0xAB, 0xCD};
+    uint8_t tmp[2];
+    ck_assert(ringbuf_write(&rb, test_bytes, 1) == RB_SUCCESS);
+    ck_assert(ringbuf_read(&rb, tmp, 1) == RB_SUCCESS);
+    ck_assert(test_bytes[0] == tmp[0]);
+
+    // Write 998 bytes leaving two spaces left, the last of which will wrap
+    __auto_free uint8_t *rand = get_random_bytes(998);
+    ck_assert_ptr_nonnull(rand);
+    ck_assert(ringbuf_write(&rb, rand, 998) == RB_SUCCESS);
+
+    // Write the two bytes and confirm that overflow occurred
+    ck_assert(ringbuf_write(&rb, test_bytes, 2) == RB_SUCCESS);
+    ck_assert_msg(rb_buf[0] == test_bytes[1], "Last byte didn't wrap around as expected!");
+    ck_assert_msg(rb_buf[999] == test_bytes[0], "First byte didn't end up at end of buffer!");
+
+    // Confirm that further writes fail
+    ck_assert(ringbuf_write(&rb, rand, 1) != RB_SUCCESS);
+
+    // Read everything back and confirm no corruption
+    __auto_free uint8_t *rand_tmp = malloc(998);
+    ck_assert_ptr_nonnull(rand_tmp);
+    ck_assert(ringbuf_read(&rb, rand_tmp, 998) == RB_SUCCESS);
+    ck_assert(memcmp(rand, rand_tmp, 998) == 0);
+
+    ck_assert(ringbuf_read(&rb, tmp, 2) == RB_SUCCESS);
+    ck_assert_msg(test_bytes[0] == tmp[0] && test_bytes[1] == tmp[1],
+                  "FAILED: {0x%x, 0x%x}", tmp[0], tmp[1]);
+
+}
+END_TEST
+
+// Test writes that occur after a wrap
+START_TEST(ringbuf_write_after_wrap_test) {
+    ringbuf_t rb;
+    __auto_free uint8_t *rb_buf = malloc(1000);
+    ck_assert_ptr_nonnull(rb_buf);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0, NULL) == RB_SUCCESS);
+
+    // Write a byte and read it back to offset the start pointer by 2
+    const uint8_t test_bytes[2] = {0xAB, 0xCD};
+    uint8_t tmp[2];
+    ck_assert(ringbuf_write(&rb, test_bytes, 1) == RB_SUCCESS);
+    ck_assert(ringbuf_read(&rb, tmp, 1) == RB_SUCCESS);
+    ck_assert(test_bytes[0] == tmp[0]);
+
+    // Write 1000 bytes, the last two bytes of which will wrap
+    __auto_free uint8_t *rand = get_random_bytes(1000 + 1 /* 1 used later */);
+    ck_assert_ptr_nonnull(rand);
+    ck_assert(ringbuf_write(&rb, rand, 1000) == RB_SUCCESS);
+
+    // Read 500 bytes and write 500 new bytes back
+    __auto_free uint8_t *rand2 = get_random_bytes(500);
+    ck_assert_ptr_nonnull(rand2);
+    __auto_free uint8_t *rand_tmp = malloc(1000);
+    ck_assert_ptr_nonnull(rand_tmp);
+    ck_assert(ringbuf_read(&rb, rand_tmp, 500) == RB_SUCCESS);
+    ck_assert(memcmp(rand_tmp, rand, 500) == 0);
+    ck_assert(ringbuf_write(&rb, rand2, 500) == RB_SUCCESS);
+
+    // Flush the whole buffer and confirm no corruption occurred
+    ck_assert(ringbuf_read(&rb, rand_tmp, 500) == RB_SUCCESS);
+    ck_assert(memcmp(rand_tmp, rand + 500, 500) == 0);
+    ck_assert(ringbuf_read(&rb, rand_tmp, 500) == RB_SUCCESS);
+    ck_assert(memcmp(rand_tmp, rand2, 500) == 0);
+
+    // Now the ring buffer should be empty.
+    // Confirm that writes for 1001 bytes fail and 1000 succeed
+    ck_assert(ringbuf_write(&rb, rand, 1001) == RB_NOSPACE);
+    ck_assert(ringbuf_write(&rb, rand, 1000) == RB_SUCCESS);
+
+}
+END_TEST
+
+
+/// ringbuf:feature tests
+
+void *ringbuf_blocking_write_test_host_thread(void *rb_) {
+    ringbuf_t *rb = rb_;
+
+    // Sleep 0.2s and flush the buffer
+    usleep(200 * 1000);
+    uint8_t tmp[10];
+    if (ringbuf_read(rb, tmp, 10) != RB_SUCCESS)
+        return "Failed to flush ringbuf!";
 
     return NULL;
 }
 
-void *client_thread(void *handle) {
-    libkvmchan_t *chan = libkvmchan_client_open(handle);
-    if (!chan) {
-        perror("libkvmchan_client_open");
-        return NULL;
-    }
+void *ringbuf_blocking_write_test_client_thread(void *rb) {
+    // Perform a blocking write on the ringbuf
+    uint8_t *write_buf = get_random_bytes(10);
+    if (!write_buf)
+        return "Failed to get 10 random bytes!";
 
-    for(;;) {
-        // Read string
-        char buf[sizeof(TEST_STR)];
-        memset(buf, 0, sizeof(buf));
-        if (!libkvmchan_read(chan, buf, sizeof(TEST_STR))) {
-            printf("Failed to read test str!\n");
-        } else {
-            printf("Got test str: %s\n", buf);
-            // Corrupt pos_end ptr to trigger security event
-            shmem_hdr_t *hdr = chan->shm;
-            //hdr->host_to_client_rb.pos_end += 1;
-        }
-
-        //assert(strcmp(buf, TEST_STR) == 0);
-
-        usleep(1000 * 1000);
-    }
+    if (ringbuf_write(rb, write_buf, 10) != RB_SUCCESS)
+        return "Failed to write to buffer!";
 
     return NULL;
 }
 
+// Make sure blocking writes work as expected
+START_TEST(ringbuf_blocking_write_test) {
+    ringbuf_t rb;
+    uint8_t rb_buf[10];
+    ck_assert(ringbuf_init(&rb, rb_buf, 10, 0, NULL) == RB_SUCCESS);
 
-int main(int argc, char **argv) {
-    // Manually create an shm_handle for testing
-    // between two threads in the same process
-    void *mem = malloc(0x10000);
-    assert(mem && "failed to allocate memory");
-    libkvmchan_shm_handle_t handle = {mem, 0x10000};
+    // Fill the ring buffer up to prevent instant writes
+    ck_assert(ringbuf_write(&rb, test_pattern_10, 10) == RB_SUCCESS);
 
-    // Spawn a server and client thread
-    pthread_t server, client;
-    assert(!pthread_create(&server, NULL, server_thread, &handle));
-    assert(!pthread_create(&client, NULL, client_thread, &handle));
-    pthread_join(server, NULL);
-    pthread_join(client, NULL);
+    // Confirm that the buffer is full
+    ck_assert(ringbuf_write(&rb, test_pattern_10, 1) == RB_NOSPACE);
+
+    // Enable blocking mode in the ringbuffer and spawn two threads
+    // - The client thread will perform a blocking write operation
+    // - The host thread will wait and read 10 bytes, freeing the client thread to write
+    rb.flags |= RINGBUF_FLAG_BLOCKING;
+
+    pthread_t host, client;
+    void *host_ret, *client_ret;
+    ck_assert(!pthread_create(&host, NULL, ringbuf_blocking_write_test_host_thread, &rb));
+    ck_assert(!pthread_create(&client, NULL, ringbuf_blocking_write_test_client_thread, &rb));
+    pthread_join(host, &host_ret);
+    pthread_join(client, &client_ret);
+
+    // The threads will return NULL on success or a string error message on fail.
+    ck_assert_msg(!host_ret, "Host thread failed: %s", (const char *)host_ret);
+    ck_assert_msg(!client_ret, "Client thread failed: %s", (const char *)client_ret);
+}
+END_TEST
+
+void *ringbuf_blocking_read_test_host_thread(void *rb_) {
+    ringbuf_t *rb = rb_;
+
+    // Sleep 0.2s and write 10 bytes
+    usleep(200 * 1000);
+    if (ringbuf_write(rb, test_pattern_10, 10) != RB_SUCCESS)
+        return "Failed to write to buffer!";
+
+    return NULL;
+}
+
+void *ringbuf_blocking_read_test_client_thread(void *rb) {
+    uint8_t tmp[10];
+    if (ringbuf_read(rb, tmp, 10) != RB_SUCCESS)
+        return "Failed to read from buffer!";
+
+    if (memcmp(tmp, test_pattern_10, 10) != 0)
+        return "Read returned bad data!";
+
+    return NULL;
+}
+
+// Make sure blocking reads work as expected
+START_TEST(ringbuf_blocking_read_test) {
+    ringbuf_t rb;
+    uint8_t rb_buf[10];
+    ck_assert(ringbuf_init(&rb, rb_buf, 10, RINGBUF_FLAG_BLOCKING, NULL) == RB_SUCCESS);
+
+    // Spawn two threads
+    // - The client thread will perform a blocking read operation
+    // - The host will wait and write 10 bytes, freeing the client to read
+    pthread_t host, client;
+    void *host_ret, *client_ret;
+    ck_assert(!pthread_create(&host, NULL, ringbuf_blocking_read_test_host_thread, &rb));
+    ck_assert(!pthread_create(&client, NULL, ringbuf_blocking_read_test_client_thread, &rb));
+    pthread_join(host, &host_ret);
+    pthread_join(client, &client_ret);
+
+    // The threads will return NULL on success or a string error message on fail.
+    ck_assert_msg(!host_ret, "Host thread failed: %s", (const char *)host_ret);
+    ck_assert_msg(!client_ret, "Client thread failed: %s", (const char *)client_ret);
+}
+END_TEST
+
+// Make sure relative buffer mode works
+START_TEST(ringbuf_relative_test) {
+    __auto_free uint8_t *rb_buf = malloc(100);
+    ck_assert_ptr_nonnull(rb_buf);
+
+    ringbuf_t rb;
+    ck_assert(ringbuf_init(&rb, rb_buf, 100, RINGBUF_FLAG_RELATIVE, NULL) == RB_SUCCESS);
+
+    // Write 100 random bytes and ensure that they're in the correct position
+    __auto_free uint8_t *rand = get_random_bytes(100);
+    ck_assert_ptr_nonnull(rand);
+
+    ck_assert(ringbuf_write(&rb, rand, 100) == RB_SUCCESS);
+    ck_assert(rb_buf[0] == rand[0]);
+    ck_assert(rb_buf[99] == rand[99]);
+
+    // Read the data back and ensure nothing went wrong
+    __auto_free uint8_t *tmp = malloc(100);
+    ck_assert_ptr_nonnull(tmp);
+    ck_assert(ringbuf_read(&rb, tmp, 100) == RB_SUCCESS);
+    ck_assert(memcmp(tmp, rand, 100) == 0);
+}
+END_TEST
+
+// Make sure we can properly construct a ringbuf with sec context
+#if 0
+START_TEST(ringbuf_sec_init) {
+
+}
+END_TEST
+#endif
+
+Suite *ringbuf_test_suite(void) {
+    Suite *s = suite_create("ringbuf");
+
+    TCase *tc_io = tcase_create("io");
+    tcase_add_test(tc_io, ringbuf_overflow_test);
+    tcase_add_test(tc_io, ringbuf_nospace_test);
+    tcase_add_test(tc_io, ringbuf_write_wrap_test);
+    tcase_add_test(tc_io, ringbuf_write_after_wrap_test);
+    suite_add_tcase(s, tc_io);
+
+    TCase *tc_feature = tcase_create("feature");
+    tcase_add_test(tc_feature, ringbuf_blocking_write_test);
+    tcase_add_test(tc_feature, ringbuf_blocking_read_test);
+    tcase_add_test(tc_feature, ringbuf_relative_test);
+    suite_add_tcase(s, tc_feature);
+
+    return s;
+}
+
+int main() {
+    int number_failed;
+    Suite *s;
+    SRunner *sr;
+
+    s = ringbuf_test_suite();
+    sr = srunner_create(s);
+
+    srunner_run_all(sr, CK_VERBOSE);
+    number_failed = srunner_ntests_failed(sr);
+    srunner_free(sr);
+
+    return (number_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

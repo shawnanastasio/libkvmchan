@@ -290,7 +290,6 @@ fail:
  * @return success
  */
 bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
-    shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
         // Use host_to_client ringbuffer
         return ringbuf_write_sec(chan->host_to_client_sec, data, size) == RB_SUCCESS;
@@ -311,7 +310,6 @@ bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
  * @return success
  */
 bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size) {
-    shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
         return ringbuf_read_sec(chan->client_to_host_sec, out, size) == RB_SUCCESS;
     } else {
@@ -355,19 +353,6 @@ void libkvmchan_clear_eventfd(libkvmchan_t *chan) {
 
 /// TEST
 #ifdef LIBKVMCHAN_TEST
-uint8_t *get_random_bytes(size_t num) {
-    uint8_t *buf = malloc(num);
-    static int fd = -1;
-    if (fd < 0) {
-        fd = open("/dev/urandom", O_RDONLY);
-        if (fd < 0) {
-            free(buf);
-            return NULL;
-        }
-    }
-    read(fd, buf, num);
-    return buf;
-}
 
 void test_ringbufs(libkvmchan_t *chan) {
     shmem_hdr_t *hdr = chan->shm;

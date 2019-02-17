@@ -7,7 +7,7 @@ As of now, only blocking, packet-based communication is supported.
 
 Overview
 -----
-libkvmchan uses a host/client architecture. Generally, the host is the KVM host system and the client is a virtual machine.
+libkvmchan uses a host/client architecture. Generally, the host is the KVM host system and the client is a virtual machine, but other configurations work too.
 Since libkvmchan uses `ivshmem`, all client machines must be configured with an `ivshmem` device in qemu/libvirt.
 This is described in the [Looking Glass Project's Documentation](https://looking-glass.hostfission.com/quickstart/linux/libvirt).
 
@@ -88,6 +88,12 @@ worst case, a malicious process can only get a trusted process to overwrite exis
 in the ring buffer and corrupt it. This should have no security consequences for the
 trusted process, since it will never read from any ring buffer that it writes to.
 
+Daemon
+------
+The included daemon is a WIP that will eventually allow automatic configuration of ivshmem shared memory channels
+and libkvmchan ring buffers by accessing the host's libvirt configuration interface. This will allow users
+to utilize libkvmchan without manually configuring the ivshmem devices attached to each VM, as well as
+dynamic allocation of >2 ring buffers per ivshmem channel.
 
 Why?
 ---

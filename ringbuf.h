@@ -62,6 +62,9 @@ typedef enum ringbuf_ret {
  *   - pos_start in reference struct must be updated by us on each read
  *
  *   - eventfd data must be stored out of reach (TODO)
+ *
+ * In either case, the full flag can be modified and does not need to be
+ * validated.
  */
 typedef struct ringbuf {
     uint8_t flags;
@@ -71,6 +74,7 @@ typedef struct ringbuf {
 
     size_t pos_start; // inc
     size_t pos_end; // exc
+    bool full; // Is the rb full?
 
     // eventfd data storage
     int eventfd;
@@ -92,13 +96,13 @@ ringbuf_ret_t ringbuf_sec_infer_context(ringbuf_t *untrusted, uint8_t flags_mask
                                          intptr_t offset, ringbuf_sec_context_t **sec_out);
 void ringbuf_sec_flush_write(ringbuf_sec_context_t *sec, ringbuf_t *validated);
 void ringbuf_sec_flush_read(ringbuf_sec_context_t *sec, ringbuf_t *validated);
-ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, void *data, size_t size);
+ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read_sec(ringbuf_sec_context_t *sec, void *out, size_t size);
 
 // Ringbuf I/O functions
 ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, ringbuf_sec_context_t **sec_out);
-//ringbuf_ret_t ringbuf_write(ringbuf_t *rb, void *data, size_t size);
-//ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
+ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
+ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
 int  ringbuf_get_eventfd(ringbuf_t *rb);
 void ringbuf_clear_eventfd(ringbuf_t *rb);
 

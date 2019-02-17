@@ -35,11 +35,17 @@
 // TODO: is this optimal performance-wise?
 #define BUSYWAIT_YIELD_TO_OS() usleep(1)
 
-ringbuf_ret_t ringbuf_write(ringbuf_t *rb, void *data, size_t size);
-ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
+// Ignore unused variable/return warnings. Especially for eventfd actions that can't fail.
+// This macro was taken from gnulib.
+#if 3 < __GNUC__ + (4 <= __GNUC_MINOR__)
+# define ignore_value(x) \
+    (__extension__ ({ __typeof__ (x) __x = (x); (void) __x; }))
+#else
+# define ignore_value(x) ((void) (x))
+#endif
+
 static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
-
 
 /// Security-related operations
 ringbuf_ret_t ringbuf_sec_validate_untrusted_reader(ringbuf_sec_context_t *sec,
@@ -140,16 +146,22 @@ void ringbuf_sec_flush_write(ringbuf_sec_context_t *sec, ringbuf_t *validated) {
     // pos_end must be updated in the untrusted and reference structs
     sec->reference->pos_end = validated->pos_end;
     sec->untrusted->pos_end = validated->pos_end;
+
+    // Full must be flushed to the untrusted struct
+    sec->untrusted->full = validated->full;
 }
 
 void ringbuf_sec_flush_read(ringbuf_sec_context_t *sec, ringbuf_t *validated) {
     // pos_start must be updated in the untrusted and reference structs
     sec->reference->pos_start = validated->pos_start;
     sec->untrusted->pos_start = validated->pos_start;
+
+    // Full must be flushed to the untrusted struct
+    sec->untrusted->full = validated->full;
 }
 
 // Wrapper for ringbuf_write that performs security validation
-ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, void *data, size_t size) {
+ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, const void *data, size_t size) {
     // If the reference is marked as blocking, busywait until the untrusted struct
     // has enough free space. This is safe since the data will be validated before writing.
     if (sec->reference->flags & RINGBUF_FLAG_BLOCKING) {
@@ -263,12 +275,14 @@ ringbuf_ret_t ringbuf_sec_infer_context(ringbuf_t *untrusted, uint8_t flags_mask
 }
 
 /// Ring buffer implementation
+
 static inline size_t ringbuf_free_space(ringbuf_t *rb) {
-    if (rb->pos_start <= rb->pos_end) {
+    if (rb->pos_start == rb->pos_end)
+        return rb->full ? 0 : rb->size;
+    else if (rb->pos_start < rb->pos_end)
         return rb->size - (rb->pos_end - rb->pos_start);
-    } else {
-        return (rb->pos_start - rb->pos_end);
-    }
+    else // rb->pos_start > rb->pos_end
+        return rb->pos_start - rb->pos_end;
 }
 
 static inline size_t ringbuf_available(ringbuf_t *rb) {
@@ -302,6 +316,7 @@ ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flag
     new_rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
     new_rb->size = size;
     new_rb->start = start;
+    new_rb->full = false;
 
     new_rb->pos_start = 0;
     new_rb->pos_end = 0;
@@ -324,11 +339,19 @@ ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flag
     return RB_SUCCESS;
 }
 
-ringbuf_ret_t ringbuf_write(ringbuf_t *rb, void *data, size_t size) {
-    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    size_t space_left = ringbuf_free_space(rb);
-    if (space_left < size) {
+ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
+    // If this rb is blocking (and isn't a sec copy), wait for space to become available.
+    // Sec copies handle blocking in their respective wrapper functions.
+    if (!(rb->flags & RINGBUF_FLAG_SEC_COPY) && rb->flags & RINGBUF_FLAG_BLOCKING) {
+        while (ringbuf_free_space(rb) < size)
+            BUSYWAIT_YIELD_TO_OS();
+    } else if (ringbuf_free_space(rb) < size) {
         return RB_NOSPACE;
+    }
+
+    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
+    if (size == ringbuf_free_space(rb)) {
+        rb->full = true;
     }
 
     if (rb->pos_start <= rb->pos_end) {
@@ -358,17 +381,19 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, void *data, size_t size) {
 }
 
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
-    // If this rb is blocking, wait for data
-    //if (rb->flags & RINGBUF_FLAG_BLOCKING) {
-    //    while (ringbuf_available(rb) < size)
-    //        usleep(1);
-    //}
+    // If this rb is blocking (and isn't a sec copy), wait for data.
+    // Sec copies handle blocking in their respective wrapper functions.
+    if (!(rb->flags & RINGBUF_FLAG_SEC_COPY) && rb->flags & RINGBUF_FLAG_BLOCKING) {
+        while (ringbuf_available(rb) < size)
+            BUSYWAIT_YIELD_TO_OS();
+    } else if (rb->size - ringbuf_free_space(rb) < size) {
+        return RB_NODATA;
+    }
 
     void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    if (rb->size - ringbuf_free_space(rb) < size)
-        return RB_NODATA;
+    rb->full = false;
 
-    if (rb->pos_start <= rb->pos_end) {
+    if (rb->pos_start < rb->pos_end) {
         // Read from [pos_start, pos_end)
         size_t avail = rb->pos_end - rb->pos_start;
         assert(avail >= size);
@@ -405,7 +430,7 @@ static void *_eventfd_thread_handler(void *_rb) {
 
     // Set the eventfd
     uint64_t buf = 1;
-    write(rb->eventfd, &buf, sizeof(uint64_t));
+    ignore_value(write(rb->eventfd, &buf, sizeof(uint64_t)));
 
     return NULL;
 }
@@ -426,7 +451,7 @@ int ringbuf_get_eventfd(ringbuf_t *rb) {
     // If data is already available, take a shortcut and just notify
     if (ringbuf_available(rb)) {
         uint64_t buf = 1;
-        write(rb->eventfd, &buf, sizeof(buf));
+        ignore_value(write(rb->eventfd, &buf, sizeof(buf)));
         return rb->eventfd;
     }
 
@@ -447,6 +472,6 @@ void ringbuf_clear_eventfd(ringbuf_t *rb) {
     uint64_t buf;
     int fd_flags = fcntl(rb->eventfd, F_GETFL, 0);
     fcntl(rb->eventfd, F_SETFL, fd_flags | O_NONBLOCK);
-    read(rb->eventfd, &buf, sizeof(uint64_t));
+    ignore_value(read(rb->eventfd, &buf, sizeof(uint64_t)));
     fcntl(rb->eventfd, F_SETFL, fd_flags);
 }
