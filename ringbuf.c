@@ -466,7 +466,7 @@ int ringbuf_get_eventfd(ringbuf_t *rb) {
 void ringbuf_clear_eventfd(ringbuf_t *rb) {
     // Kill thread if it's still running
     rb->kill_thread = true;
-    usleep(1);
+    pthread_join(rb->eventfd_thread, NULL);
 
     // Temporarily disable blocking and reset the eventfd's counter
     uint64_t buf;
