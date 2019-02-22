@@ -40,31 +40,13 @@ typedef enum ringbuf_ret {
 } ringbuf_ret_t;
 
 /**
- * In situations where one of the ring buffer clients is untrusted,
- * the following security precautions must be taken
- * (Note the assumption that only one client is writing and one is reading):
+ * A struct that contains ringbuffer metadata.
+ * Must not exposed in shared memory.
  *
- * Trusted writer, untrusted reader:
- *   - a copy of flags, size, start, offset, pos_end must be stored in a
- *     non-shared region and compared to this struct on each operation.
- *
- *   - pos_start is controlled by attacker, bounds check it
- *
- *   - pos_end in reference struct must be updated by us on each read
- *
- *
- * Trusted reader, untrusted writer:
- *   - flags, size, start, offset, pos_start must be stored in a
- *     non-shared region and compared to this struct on each operation.
- *
- *   - pos_end must be bounds checked
- *
- *   - pos_start in reference struct must be updated by us on each read
- *
- *   - eventfd data must be stored out of reach (TODO)
- *
- * In either case, the full flag can be modified and does not need to be
- * validated.
+ * For shared ring buffers, ringbuf_sec* functions
+ * should be used in conjunction with struct ringbuf_pub,
+ * which contains a subset of the information in this
+ * struct that can safely be shared (with bounds checks).
  */
 typedef struct ringbuf {
     uint8_t flags;
@@ -79,31 +61,42 @@ typedef struct ringbuf {
     // eventfd data storage
     int eventfd;
     pthread_t eventfd_thread;
-    volatile bool kill_thread;
+    bool kill_thread;
 } ringbuf_t;
 
-typedef struct ringbuf_sec_context {
-    ringbuf_t *untrusted;
-    ringbuf_t *reference;
-} ringbuf_sec_context_t;
+typedef struct ringbuf_pub {
+    /**
+     * Trusted reader, untrusted writer
+     *   - reader will use their priv pos_start and flush it here on operation end
+     *   - reader will use this pos_end after bounds checks
+     *
+     * Trusted writer, untrusted reader
+     *   - writer will use their priv pos_end and flush it here on operation end
+     *   - writer will use this pos_start after bounds checks
+     */
+    size_t pos_start_untrusted;
+    size_t pos_end_untrusted;
+    bool full;
 
-/// Security functions
-ringbuf_ret_t ringbuf_sec_validate_untrusted_reader(ringbuf_sec_context_t *sec,
-                                                    ringbuf_t *validated_out);
-ringbuf_ret_t ringbuf_sec_validate_untrusted_writer(ringbuf_sec_context_t *sec,
-                                                    ringbuf_t *validated_out);
-ringbuf_ret_t ringbuf_sec_infer_context(ringbuf_t *untrusted, uint8_t flags_mask, size_t size,
-                                         intptr_t offset, ringbuf_sec_context_t **sec_out);
-void ringbuf_sec_flush_write(ringbuf_sec_context_t *sec, ringbuf_t *validated);
-void ringbuf_sec_flush_read(ringbuf_sec_context_t *sec, ringbuf_t *validated);
-ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, const void *data, size_t size);
-ringbuf_ret_t ringbuf_read_sec(ringbuf_sec_context_t *sec, void *out, size_t size);
+    // The flags that the ringbuf was supposedly created with.
+    // The client should do some sanity checks and then immediately copy it
+    // into a private structure.
+    uint8_t flags_untrusted;
+} ringbuf_pub_t;
+
+// Security functions
+ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start, size_t size,
+                 uint8_t flags);
+ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
+                                  size_t size, uint8_t flags_mask);
+ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size);
+ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size);
 
 // Ringbuf I/O functions
-ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, ringbuf_sec_context_t **sec_out);
+ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags);
 ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
-int  ringbuf_get_eventfd(ringbuf_t *rb);
+int  ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub);
 void ringbuf_clear_eventfd(ringbuf_t *rb);
 
 #endif // LIBKVMCHAN_RINGBUF_H

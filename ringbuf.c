@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <sys/eventfd.h>
 #include <pthread.h>
@@ -48,228 +49,183 @@ static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
 /// Security-related operations
-ringbuf_ret_t ringbuf_sec_validate_untrusted_reader(ringbuf_sec_context_t *sec,
-                                                    ringbuf_t *validated_out) {
-    // Validate all security-critical values in a ringbuf that
-    // is meant to be read by an untrusted client.
 
-    // First, make a copy of the untrusted struct so that it can't be
-    // modified by an attacker during validation.
-    ringbuf_t untrusted_copy;
-    memcpy(&untrusted_copy, sec->untrusted, sizeof(ringbuf_t));
+/**
+ * Initialize a new sec ring buffer.
+ * Used in situations where the ring buffer is to be accessed by multiple processes,
+ * as is the primary use case for libkvmchan. The ring buffer metadata is split into two
+ * structures, ringbuf_t and ringbuf_pub_t. The latter contains data that may be placed
+ * in a shared memory region for sharing with the other process.
+ *
+ * Future operations on a ring buffer initialized /MUST/ be done with the relevant
+ * ringbuf_sec_* function, rather than the regular ringbuf_ functions.
+ * Failure to do so will leave the buffer in an undefined state and compromise
+ * all security guarantees.
+ *
+ * @param[out] priv  private structure to initialize
+ * @param[out] pub   public (shared) structure to initialize
+ * @param      start start address of ring buffer data region
+ * @param      size  size of ring buffer data region
+ * @param      flags ring buffer flags
+ * @return     ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start, size_t size,
+                 uint8_t flags) {
+    // Initialize priv
+    flags |= RINGBUF_FLAG_SEC_COPY;
+    priv->flags = flags;
+    priv->size = size;
+    priv->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)priv : 0;
+    priv->start = start;
+    priv->pos_start = 0;
+    priv->pos_end = 0;
+    priv->full = false;
+    priv->eventfd = -1;
 
-    ringbuf_t *reference = sec->reference;
-    // Validate against reference
-    if (untrusted_copy.flags != reference->flags)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.size != reference->size)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.start != reference->start)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.offset != reference->offset)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.pos_end != reference->pos_end)
-        return RB_SEC_FAIL;
+    // Initialize pub
+    pub->pos_start_untrusted = 0;
+    pub->pos_end_untrusted = 0;
+    pub->flags_untrusted = flags;
+    pub->full = false;
 
-    // Ensure that pos_start is within bounds
-    if (untrusted_copy.pos_start >= reference->size) {
-        return RB_SEC_FAIL;
-    }
-
-    // Successfully validated, write validated structure.
-    memcpy(validated_out, &untrusted_copy, sizeof(ringbuf_t));
-
-    // In the case of RINGBUF_FLAG_RELATIVE, we must convert the returned
-    // validated structure to use absolute addressing instead of relative addressing, since
-    // the relative offset was calculated from the original (untrusted) struct
-    // and will be meaningless in a copy that lies elsewhere in memory.
-    //void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    if (reference->flags & RINGBUF_FLAG_RELATIVE) {
-        validated_out->start = (uint8_t *)sec->untrusted + reference->offset;
-        validated_out->flags &= ~RINGBUF_FLAG_RELATIVE;
-    }
-
-    // Set the SEC_COPY flag on the output copy
-    validated_out->flags |= RINGBUF_FLAG_SEC_COPY;
-
-    return RB_SUCCESS;
-}
-
-ringbuf_ret_t ringbuf_sec_validate_untrusted_writer(ringbuf_sec_context_t *sec,
-                                                    ringbuf_t *validated_out) {
-    // Validate all security-critical values in a ringbuf that
-    // is meant to be written to by an untrusted client.
-
-    // First, make a copy of the untrusted struct so that it can't be
-    // modified by an attacker during validation.
-    ringbuf_t untrusted_copy;
-    memcpy(&untrusted_copy, sec->untrusted, sizeof(ringbuf_t));
-
-    ringbuf_t *reference = sec->reference;
-    // Validate against reference
-    if (untrusted_copy.flags != reference->flags)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.size != reference->size)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.start != reference->start)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.offset != reference->offset)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.pos_start != reference->pos_start)
-        return RB_SEC_FAIL;
-
-    // Ensure that pos_end is within bounds
-    if (untrusted_copy.pos_end >= reference->size) {
-        return RB_SEC_FAIL;
-    }
-
-    // Successfully validated, write validated structure.
-    memcpy(validated_out, &untrusted_copy, sizeof(ringbuf_t));
-
-    // In the case of RINGBUF_FLAG_RELATIVE, we must convert the returned
-    // validated structure to use absolute addressing instead of relative addressing, since
-    // the relative offset was calculated from the original (untrusted) struct
-    // and will be meaningless in a copy that lies elsewhere in memory.
-    //void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    if (reference->flags & RINGBUF_FLAG_RELATIVE) {
-        validated_out->start = (uint8_t *)sec->untrusted + reference->offset;
-        validated_out->flags &= ~RINGBUF_FLAG_RELATIVE;
-    }
-
-    // Set the SEC_COPY flag on the output copy
-    validated_out->flags |= RINGBUF_FLAG_SEC_COPY;
-
-    return RB_SUCCESS;
-}
-
-void ringbuf_sec_flush_write(ringbuf_sec_context_t *sec, ringbuf_t *validated) {
-    // pos_end must be updated in the untrusted and reference structs
-    sec->reference->pos_end = validated->pos_end;
-    sec->untrusted->pos_end = validated->pos_end;
-
-    // Full must be flushed to the untrusted struct
-    sec->untrusted->full = validated->full;
-}
-
-void ringbuf_sec_flush_read(ringbuf_sec_context_t *sec, ringbuf_t *validated) {
-    // pos_start must be updated in the untrusted and reference structs
-    sec->reference->pos_start = validated->pos_start;
-    sec->untrusted->pos_start = validated->pos_start;
-
-    // Full must be flushed to the untrusted struct
-    sec->untrusted->full = validated->full;
-}
-
-// Wrapper for ringbuf_write that performs security validation
-ringbuf_ret_t ringbuf_write_sec(ringbuf_sec_context_t *sec, const void *data, size_t size) {
-    // If the reference is marked as blocking, busywait until the untrusted struct
-    // has enough free space. This is safe since the data will be validated before writing.
-    if (sec->reference->flags & RINGBUF_FLAG_BLOCKING) {
-        while (ringbuf_free_space(sec->untrusted) < size) {
-            BUSYWAIT_YIELD_TO_OS();
-        }
-    }
-
-
-    // Before writing, validate that the other party (the reader) hasn't
-    // tampered with the ring buffer
-    ringbuf_t validated;
-    ringbuf_ret_t ret = ringbuf_sec_validate_untrusted_reader(sec, &validated);
-    if (ret != RB_SUCCESS)
-        return ret;
-
-    // Perform the write operation on the validated ringbuffer
-    ret = ringbuf_write(&validated, data, size);
-    if (ret != RB_SUCCESS)
-        return ret;
-
-    // Flush the changes we made to our validated struct
-    ringbuf_sec_flush_write(sec, &validated);
-    return RB_SUCCESS;
-}
-
-// Wrapper for ringbuf_read that performs security validation
-ringbuf_ret_t ringbuf_read_sec(ringbuf_sec_context_t *sec, void *out, size_t size) {
-    // If the reference is marked as blocking, busywait until the untrusted struct
-    // has enough data in it.
-    if (sec->reference->flags & RINGBUF_FLAG_BLOCKING) {
-        while (ringbuf_available(sec->untrusted) < size) {
-            BUSYWAIT_YIELD_TO_OS();
-        }
-    }
-
-    // Before reading, validate that the other party (the writer) hasn't
-    // tampered with the ring buffer
-    ringbuf_t validated;
-    ringbuf_ret_t ret = ringbuf_sec_validate_untrusted_writer(sec, &validated);
-    if (ret != RB_SUCCESS)
-        return ret;
-
-    // Perform the read operation on the validated ringbuffer
-    ret = ringbuf_read(&validated, out, size);
-    if (ret != RB_SUCCESS)
-        return ret;
-
-    // Flush the changes
-    ringbuf_sec_flush_read(sec, &validated);
     return RB_SUCCESS;
 }
 
 /**
- * Create a security context from the given ring buffer if the fields
- * match the values provided.
+ * Infer a ringbuf_priv_t from an already initialized ringbuf_pub_t.
  *
- * If the untrusted struct fails validation against the provided fields,
- * no security context is created.
+ * Used by clients to establish a handle to an existing ring buffer.
+ * Requires the caller to know some key information about the ring buffer
+ * which must have been obtained from a trusted source.
  *
- * @param untrusted already-initialized ring buffer to create security context from
- * @param flags_mask mask of all flags the ring buffer is allowed to have
- * @param size       size of the ring buffer's data region
- * @param offset     offset from the untrusted struct that the buffer exists at
- * @param sec_out    on success, a pointer to the created security context is written
- * @return           ring buffer return code
+ * @param[out] priv       ringbuf_t to initialize
+ * @param      pub        public structure to infer from
+ * @param      start      start address of the ringbuffer's data
+ * @param      size       size of the ringbuffer
+ * @param      flags_mask bitmask of allowed flags
+ * @return     ring buffer return code
  */
-ringbuf_ret_t ringbuf_sec_infer_context(ringbuf_t *untrusted, uint8_t flags_mask, size_t size,
-                                         intptr_t offset, ringbuf_sec_context_t **sec_out) {
-    // Make a copy of the untrusted struct to prevent an attacker
-    // from modifying it during verification
-    ringbuf_t untrusted_copy;
-    memcpy(&untrusted_copy, untrusted, sizeof(ringbuf_t));
+ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
+                                  size_t size, uint8_t flags_mask) {
+    // Validate the data in pub
+    // Create a copy so an attacker can't modify it mid-validation
+    ringbuf_pub_t pub_copy;
+    memcpy(&pub_copy, pub, sizeof(ringbuf_pub_t));
 
-    // For now, only validate relative ringbufs
-    if (!(flags_mask & RINGBUF_FLAG_RELATIVE) || !(untrusted_copy.flags & RINGBUF_FLAG_RELATIVE))
+    // Add FLAG_SEC_COPY to the allowed flags mask
+    flags_mask |= RINGBUF_FLAG_SEC_COPY;
+
+    // Only support absolute addressing
+    if (flags_mask & RINGBUF_FLAG_RELATIVE)
         return RB_SEC_FAIL;
 
-    if (untrusted_copy.flags & ~flags_mask)
+    if (pub_copy.pos_start_untrusted >= size)
         return RB_SEC_FAIL;
-    if (untrusted_copy.size != size)
+    if (pub_copy.pos_end_untrusted >= size)
         return RB_SEC_FAIL;
-    if (untrusted_copy.offset != offset)
-        return RB_SEC_FAIL;
-
-    // Validate pointers
-    if (untrusted_copy.pos_start >= size)
-        return RB_SEC_FAIL;
-    if (untrusted_copy.pos_end >= size)
+    if (pub_copy.flags_untrusted & ~flags_mask)
         return RB_SEC_FAIL;
 
-    // Create a security context and return success
-    ringbuf_sec_context_t *sec = malloc(sizeof(ringbuf_sec_context_t));
-    if (!sec)
-        return RB_OOM;
+    // Initialize the priv struct
+    priv->flags = pub_copy.flags_untrusted;
+    priv->size = size;
+    priv->start = start;
+    priv->pos_start = pub_copy.pos_start_untrusted;
+    priv->pos_end = pub_copy.pos_end_untrusted;
+    priv->full = pub_copy.full;
+    priv->eventfd = -1;
 
-    sec->untrusted = untrusted;
+    return RB_SUCCESS;
+}
 
-    sec->reference = malloc(sizeof(ringbuf_t));
-    if (!sec->reference) {
-        free(sec);
-        return RB_OOM;
+/**
+ * Write to a sec ringbuffer.
+ *
+ * @param priv  private ring buffer data to act on
+ * @param pub   public ring buffer data to act on
+ * @param data  buffer of data to write to ring buffer
+ * @param size  amount of data to write
+ * @return      ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data,
+                                size_t size) {
+    // Flush full, pos_start from public struct
+    priv->full = pub->full;
+    priv->pos_start = pub->pos_start_untrusted;
+    if (priv->pos_start > priv->size) {
+        return RB_SEC_FAIL;
     }
 
-    // Copy the now validated untrusted_copy to the reference
-    memcpy(sec->reference, &untrusted_copy, sizeof(ringbuf_t));
+    size_t free_space = ringbuf_free_space(priv);
 
-    *sec_out = sec;
+    // If blocking is enabled, busy wait for space
+    if (priv->flags & RINGBUF_FLAG_BLOCKING) {
+        while (free_space < size) {
+            // Flush full, pos_start and check free space
+            priv->full = pub->full;
+            priv->pos_start = pub->pos_start_untrusted;
+            if (priv->pos_start > priv->size)
+                return RB_SEC_FAIL;
+
+            free_space = ringbuf_free_space(priv);
+
+            BUSYWAIT_YIELD_TO_OS();
+        }
+    }
+
+    // Perform the write
+    ringbuf_ret_t ret = ringbuf_write(priv, data, size);
+    if (ret != RB_SUCCESS)
+        return ret;
+
+    // Flush full, pos_end to the public struct
+    pub->pos_end_untrusted = priv->pos_end;
+    pub->full = priv->full;
+
+    return RB_SUCCESS;
+}
+
+/**
+ * Read from a sec ringbuffer.
+ *
+ * @param priv  private ring buffer data to act on
+ * @param pub   public ring buffer data to act on
+ * @param buf   buffer to read data into
+ * @param size  amount of data to read
+ * @return      ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size) {
+    // Flush full, pos_end from public struct
+    priv->full = pub->full;
+    priv->pos_end = pub->pos_end_untrusted;
+    if (priv->pos_end > priv->size) {
+        return RB_SEC_FAIL;
+    }
+
+    size_t available = ringbuf_available(priv);
+
+    // If blocking is enabled, busy wait for data
+    if (priv->flags & RINGBUF_FLAG_BLOCKING) {
+        while(available < size) {
+            // Flush full, pos_end and check available
+            priv->full = pub->full;
+            priv->pos_end = pub->pos_end_untrusted;
+            if (priv->pos_end > priv->size)
+                return RB_SEC_FAIL;
+
+            available = ringbuf_available(priv);
+
+            BUSYWAIT_YIELD_TO_OS();
+        }
+    }
+
+    // Perform the read
+    ringbuf_ret_t ret = ringbuf_read(priv, buf, size);
+    if (ret != RB_SUCCESS)
+        return ret;
+
+    pub->pos_start_untrusted = priv->pos_start;
+    pub->full = priv->full;
 
     return RB_SUCCESS;
 }
@@ -295,46 +251,19 @@ static inline size_t ringbuf_available(ringbuf_t *rb) {
  * @param start start address of the data region to use
  * @param size  size of the data region to use
  * @param flags flags. See RINGBUF_FLAG_BLOCKING
- * @param sec_reference if not NULL, a pointer to copy of the initialized rb struct will be written here.
- *                      See ringbuf.h for more information.
  *
  * @return success?
  */
-ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, ringbuf_sec_context_t **sec_out) {
-    ringbuf_t *new_rb = rb;
-    if (sec_out) {
-        // Initialize the reference struct first to prevent
-        // a malicious client from writing to the potentially shared `rb` struct
-        // as we initialize it
-        new_rb = malloc(sizeof(ringbuf_t));
-        if (!new_rb)
-            return RB_OOM;
-    }
+ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags) {
+    rb->flags = flags;
+    rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
+    rb->size = size;
+    rb->start = start;
+    rb->full = false;
 
-
-    new_rb->flags = flags;
-    new_rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
-    new_rb->size = size;
-    new_rb->start = start;
-    new_rb->full = false;
-
-    new_rb->pos_start = 0;
-    new_rb->pos_end = 0;
-    new_rb->eventfd = -1;
-
-    if (sec_out) {
-        // Copy reference to rb and create a new sec_context
-        memcpy(rb, new_rb, sizeof(ringbuf_t));
-
-        ringbuf_sec_context_t *sec = malloc(sizeof(ringbuf_sec_context_t));
-        if (!sec) {
-            free(new_rb);
-            return RB_OOM;
-        }
-        sec->reference = new_rb;
-        sec->untrusted = rb;
-        *sec_out = sec;
-    }
+    rb->pos_start = 0;
+    rb->pos_end = 0;
+    rb->eventfd = -1;
 
     return RB_SUCCESS;
 }
@@ -418,27 +347,55 @@ ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
     }
 }
 
-static void *_eventfd_thread_handler(void *_rb) {
-    ringbuf_t *rb = _rb;
+struct eventfd_thread_data {
+    ringbuf_t *rb;
+    ringbuf_pub_t *pub;
+};
+
+static void *_eventfd_thread_handler(void *_data) {
+    struct eventfd_thread_data *data = _data;
 
     // Busywait for bytes and notify eventfd
-    while (!rb->kill_thread && !ringbuf_available(rb))
-        BUSYWAIT_YIELD_TO_OS();
+    if (!data->pub) {
+        // No pub, just poll on the rb
+        while (!data->rb->kill_thread && !ringbuf_available(data->rb))
+            BUSYWAIT_YIELD_TO_OS();
+    } else {
+        // pub available, flush pos_end on each loop (and bounds check it)
+        size_t available;
+        do {
+            data->rb->pos_end = data->pub->pos_end_untrusted;
+            if (data->rb->pos_end > data->rb->size)
+                goto out;
 
-    if (rb->kill_thread)
-        return NULL;
+            available = ringbuf_available(data->rb);
+
+            BUSYWAIT_YIELD_TO_OS();
+        } while (!data->rb->kill_thread && !available);
+    }
+
+    if (data->rb->kill_thread)
+        goto out;
 
     // Set the eventfd
     uint64_t buf = 1;
-    ignore_value(write(rb->eventfd, &buf, sizeof(uint64_t)));
+    ignore_value(write(data->rb->eventfd, &buf, sizeof(uint64_t)));
 
+out:
+    free(data);
     return NULL;
 }
 
-int ringbuf_get_eventfd(ringbuf_t *rb) {
-    // Spawn a thread that will poll the ringbuf and notify the eventfd
-    // when data is available to read
-
+/**
+ * Return an eventfd that will notify when data is available to read
+ * from the given ringbuffer. If provided, data from the ringbuf_pub_t
+ * structure will be used to determine available space.
+ *
+ * @param rb ringbuf_t structure to notify on
+ * @param pub ringbuf_pub_t to fetch pos_end from, or NULL to use `rb`
+ * @return file descriptor for eventfd, or -1 on failure
+ */
+int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
     // Create eventfd if it doesn't exist
     if (rb->eventfd < 0) {
         rb->eventfd = eventfd(0, 0);
@@ -447,7 +404,6 @@ int ringbuf_get_eventfd(ringbuf_t *rb) {
         }
     }
 
-
     // If data is already available, take a shortcut and just notify
     if (ringbuf_available(rb)) {
         uint64_t buf = 1;
@@ -455,10 +411,19 @@ int ringbuf_get_eventfd(ringbuf_t *rb) {
         return rb->eventfd;
     }
 
-    rb->kill_thread = false;
-    int ret = pthread_create(&rb->eventfd_thread, NULL, _eventfd_thread_handler, rb);
-    if (ret)
+    // Allocate data to pass to thread
+    struct eventfd_thread_data *data = malloc(sizeof(struct eventfd_thread_data));
+    if (!data)
         return -1;
+    data->rb = rb;
+    data->pub = pub;
+
+    rb->kill_thread = false;
+    int ret = pthread_create(&rb->eventfd_thread, NULL, _eventfd_thread_handler, data);
+    if (ret) {
+        free(data);
+        return -1;
+    }
 
     return rb->eventfd;
 }

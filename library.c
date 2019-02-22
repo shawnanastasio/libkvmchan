@@ -39,8 +39,8 @@
 #define SHMEM_MAGIC 0xDEADBEEFCAFEBABA
 typedef struct shmem_hdr {
     uint64_t magic;
-    ringbuf_t host_to_client_rb;
-    ringbuf_t client_to_host_rb;
+    ringbuf_pub_t host_to_client_pub;
+    ringbuf_pub_t client_to_host_pub;
 } shmem_hdr_t;
 
 
@@ -55,9 +55,9 @@ typedef struct libkvmchan {
     // size of shared memory region
     size_t shm_size;
 
-    // Ringbuffer security contexts
-    ringbuf_sec_context_t *host_to_client_sec;
-    ringbuf_sec_context_t *client_to_host_sec;
+    // Private ring buffer control structures
+    ringbuf_t host_to_client_rb;
+    ringbuf_t client_to_host_rb;
 } libkvmchan_t;
 
 /**
@@ -196,16 +196,17 @@ libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
     void *data_base = (uint8_t *)chan->shm + 0x1000;
     size_t rb_size = (chan->shm_size - 0x1000) / 2;
 
-    ringbuf_ret_t
-    rret = ringbuf_init(&hdr->host_to_client_rb, data_base, rb_size,
-                        RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING, &chan->host_to_client_sec);
+    ringbuf_ret_t rret;
+    rret = ringbuf_sec_init(&chan->host_to_client_rb, &hdr->host_to_client_pub, data_base,
+                            rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS) {
         errno = ENOMEM;
         goto fail_malloc;
     }
 
-    rret = ringbuf_init(&hdr->client_to_host_rb, data_base + rb_size, rb_size,
-                        RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING, &chan->client_to_host_sec);
+    rret = ringbuf_sec_init(&chan->client_to_host_rb, &hdr->client_to_host_pub,
+                            data_base + rb_size, rb_size,
+                            RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS) {
         errno = ENOMEM;
         goto fail_malloc;
@@ -252,20 +253,18 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
     intptr_t data_base = (intptr_t)((uint8_t *)ret->shm + 0x1000);
     size_t rb_size = (ret->shm_size - 0x1000) / 2;
 
-    // host_to_client security context
-    rret = ringbuf_sec_infer_context(&hdr->host_to_client_rb,
-                                     RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING,
-                                     rb_size, data_base - (intptr_t)&hdr->host_to_client_rb,
-                                     &ret->host_to_client_sec);
+    // Initialize host_to_client ringbuf priv
+    rret = ringbuf_sec_infer_priv(&ret->host_to_client_rb, &hdr->host_to_client_pub,
+                                  (void *)data_base, rb_size,
+                                  RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS)
         goto fail;
 
 
-    // client_to_host security context
-    rret = ringbuf_sec_infer_context(&hdr->client_to_host_rb,
-                                     RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING,
-                                     rb_size, (data_base + rb_size) - (intptr_t)&hdr->client_to_host_rb,
-                                     &ret->client_to_host_sec);
+    // Initialize client_to_host ringbuf priv
+    rret = ringbuf_sec_infer_priv(&ret->client_to_host_rb, &hdr->client_to_host_pub,
+                                  (void *)(data_base + rb_size), rb_size,
+                                  RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS)
         goto fail;
 
@@ -290,12 +289,15 @@ fail:
  * @return success
  */
 bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
+    shmem_hdr_t *hdr = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
         // Use host_to_client ringbuffer
-        return ringbuf_write_sec(chan->host_to_client_sec, data, size) == RB_SUCCESS;
+        return ringbuf_sec_write(&chan->host_to_client_rb, &hdr->host_to_client_pub,
+                                 data, size) == RB_SUCCESS;
     } else {
         // Use client_to_host ringbuffer
-        return ringbuf_write_sec(chan->client_to_host_sec, data, size) == RB_SUCCESS;
+        return ringbuf_sec_write(&chan->client_to_host_rb, &hdr->client_to_host_pub,
+                                 data, size) == RB_SUCCESS;
     }
 }
 
@@ -310,10 +312,13 @@ bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
  * @return success
  */
 bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size) {
+    shmem_hdr_t *hdr = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
-        return ringbuf_read_sec(chan->client_to_host_sec, out, size) == RB_SUCCESS;
+        return ringbuf_sec_read(&chan->client_to_host_rb, &hdr->client_to_host_pub,
+                                out, size) == RB_SUCCESS;
     } else {
-        return ringbuf_read_sec(chan->host_to_client_sec, out, size) == RB_SUCCESS;
+        return ringbuf_sec_read(&chan->host_to_client_rb, &hdr->host_to_client_pub,
+                                out, size) == RB_SUCCESS;
     }
 }
 
@@ -330,9 +335,9 @@ bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size) {
 int libkvmchan_get_eventfd(libkvmchan_t *chan) {
     shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
-        return ringbuf_get_eventfd(&shmem->client_to_host_rb);
+        return ringbuf_get_eventfd(&chan->client_to_host_rb, &shmem->client_to_host_pub);
     } else {
-        return ringbuf_get_eventfd(&shmem->host_to_client_rb);
+        return ringbuf_get_eventfd(&chan->host_to_client_rb, &shmem->host_to_client_pub);
     }
 }
 
@@ -342,36 +347,9 @@ int libkvmchan_get_eventfd(libkvmchan_t *chan) {
  * @param chan libkvmchan_t instance to act on
  */
 void libkvmchan_clear_eventfd(libkvmchan_t *chan) {
-    shmem_hdr_t *shmem = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
-        return ringbuf_clear_eventfd(&shmem->client_to_host_rb);
+        return ringbuf_clear_eventfd(&chan->client_to_host_rb);
     } else {
-        return ringbuf_clear_eventfd(&shmem->host_to_client_rb);
+        return ringbuf_clear_eventfd(&chan->host_to_client_rb);
     }
 }
-
-
-/// TEST
-#ifdef LIBKVMCHAN_TEST
-
-void test_ringbufs(libkvmchan_t *chan) {
-    shmem_hdr_t *hdr = chan->shm;
-    assert(hdr->host_to_client_rb.size == hdr->client_to_host_rb.size);
-    size_t rb_size = hdr->host_to_client_rb.size;
-
-    // Write `size` bytes to both rbs and read back
-    uint8_t *buf = malloc(rb_size);
-    uint8_t *r1 = get_random_bytes(rb_size);
-    uint8_t *r2 = get_random_bytes(rb_size);
-    ringbuf_write(&hdr->host_to_client_rb, r1, rb_size);
-    ringbuf_write(&hdr->client_to_host_rb, r2, rb_size);
-
-    ringbuf_read(&hdr->host_to_client_rb, buf, rb_size);
-    assert(memcmp(buf, r1, rb_size) == 0);
-
-    ringbuf_read(&hdr->client_to_host_rb, buf, rb_size);
-    assert(memcmp(buf, r2, rb_size) == 0);
-
-    free(r1); free(r2);
-}
-#endif
