@@ -22,7 +22,6 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include <sys/eventfd.h>
 #include <pthread.h>
@@ -45,6 +44,9 @@
 # define ignore_value(x) ((void) (x))
 #endif
 
+// The usable space (size of ringbuf - 1)
+#define USABLE(rb) ((rb)->size - 1)
+
 static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
@@ -57,7 +59,7 @@ static inline size_t ringbuf_free_space(ringbuf_t *rb);
  * structures, ringbuf_t and ringbuf_pub_t. The latter contains data that may be placed
  * in a shared memory region for sharing with the other process.
  *
- * Future operations on a ring buffer initialized /MUST/ be done with the relevant
+ * Future operations on a sec ring buffer /MUST/ be done with the relevant
  * ringbuf_sec_* function, rather than the regular ringbuf_ functions.
  * Failure to do so will leave the buffer in an undefined state and compromise
  * all security guarantees.
@@ -79,14 +81,12 @@ ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
     priv->start = start;
     priv->pos_start = 0;
     priv->pos_end = 0;
-    priv->full = false;
     priv->eventfd = -1;
 
     // Initialize pub
     pub->pos_start_untrusted = 0;
     pub->pos_end_untrusted = 0;
     pub->flags_untrusted = flags;
-    pub->full = false;
 
     return RB_SUCCESS;
 }
@@ -132,7 +132,6 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
     priv->start = start;
     priv->pos_start = pub_copy.pos_start_untrusted;
     priv->pos_end = pub_copy.pos_end_untrusted;
-    priv->full = pub_copy.full;
     priv->eventfd = -1;
 
     return RB_SUCCESS;
@@ -149,8 +148,7 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
  */
 ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data,
                                 size_t size) {
-    // Flush full, pos_start from public struct
-    priv->full = pub->full;
+    // Flush pos_start from public struct
     priv->pos_start = pub->pos_start_untrusted;
     if (priv->pos_start > priv->size) {
         return RB_SEC_FAIL;
@@ -161,8 +159,7 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
     // If blocking is enabled, busy wait for space
     if (priv->flags & RINGBUF_FLAG_BLOCKING) {
         while (free_space < size) {
-            // Flush full, pos_start and check free space
-            priv->full = pub->full;
+            // Flush pos_start and check free space
             priv->pos_start = pub->pos_start_untrusted;
             if (priv->pos_start > priv->size)
                 return RB_SEC_FAIL;
@@ -178,9 +175,8 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
     if (ret != RB_SUCCESS)
         return ret;
 
-    // Flush full, pos_end to the public struct
+    // Flush pos_end to the public struct
     pub->pos_end_untrusted = priv->pos_end;
-    pub->full = priv->full;
 
     return RB_SUCCESS;
 }
@@ -195,8 +191,7 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
  * @return      ring buffer return code
  */
 ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size) {
-    // Flush full, pos_end from public struct
-    priv->full = pub->full;
+    // Flush pos_end from public struct
     priv->pos_end = pub->pos_end_untrusted;
     if (priv->pos_end > priv->size) {
         return RB_SEC_FAIL;
@@ -207,8 +202,7 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
     // If blocking is enabled, busy wait for data
     if (priv->flags & RINGBUF_FLAG_BLOCKING) {
         while(available < size) {
-            // Flush full, pos_end and check available
-            priv->full = pub->full;
+            // Flush pos_end and check available
             priv->pos_end = pub->pos_end_untrusted;
             if (priv->pos_end > priv->size)
                 return RB_SEC_FAIL;
@@ -225,7 +219,6 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
         return ret;
 
     pub->pos_start_untrusted = priv->pos_start;
-    pub->full = priv->full;
 
     return RB_SUCCESS;
 }
@@ -234,15 +227,17 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
 
 static inline size_t ringbuf_free_space(ringbuf_t *rb) {
     if (rb->pos_start == rb->pos_end)
-        return rb->full ? 0 : rb->size;
+        return USABLE(rb);
+    else if (rb->pos_end == rb->pos_start - 1)
+        return 0;
     else if (rb->pos_start < rb->pos_end)
-        return rb->size - (rb->pos_end - rb->pos_start);
+        return USABLE(rb) - (rb->pos_end - rb->pos_start);
     else // rb->pos_start > rb->pos_end
         return rb->pos_start - rb->pos_end;
 }
 
 static inline size_t ringbuf_available(ringbuf_t *rb) {
-    return rb->size - ringbuf_free_space(rb);
+    return USABLE(rb) - ringbuf_free_space(rb);
 }
 
 /**
@@ -259,7 +254,6 @@ ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flag
     rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
     rb->size = size;
     rb->start = start;
-    rb->full = false;
 
     rb->pos_start = 0;
     rb->pos_end = 0;
@@ -280,7 +274,6 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
 
     void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
     if (size == ringbuf_free_space(rb)) {
-        rb->full = true;
     }
 
     if (rb->pos_start <= rb->pos_end) {
@@ -315,12 +308,11 @@ ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
     if (!(rb->flags & RINGBUF_FLAG_SEC_COPY) && rb->flags & RINGBUF_FLAG_BLOCKING) {
         while (ringbuf_available(rb) < size)
             BUSYWAIT_YIELD_TO_OS();
-    } else if (rb->size - ringbuf_free_space(rb) < size) {
+    } else if (ringbuf_available(rb) - ringbuf_free_space(rb) < size) {
         return RB_NODATA;
     }
 
     void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    rb->full = false;
 
     if (rb->pos_start < rb->pos_end) {
         // Read from [pos_start, pos_end)

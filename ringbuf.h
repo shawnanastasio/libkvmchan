@@ -50,13 +50,12 @@ typedef enum ringbuf_ret {
  */
 typedef struct ringbuf {
     uint8_t flags;
-    size_t size;
+    size_t size; // Number of usable bytes (buffer size + 1)
     uint8_t *start; // abs. addr of data buffer (used if relative=false)
     intptr_t offset; // offset of the data buffer ptr from this struct (used if relative=true)
 
     size_t pos_start; // inc
     size_t pos_end; // exc
-    bool full; // Is the rb full?
 
     // eventfd data storage
     int eventfd;
@@ -76,7 +75,6 @@ typedef struct ringbuf_pub {
      */
     size_t pos_start_untrusted;
     size_t pos_end_untrusted;
-    bool full;
 
     // The flags that the ringbuf was supposedly created with.
     // The client should do some sanity checks and then immediately copy it

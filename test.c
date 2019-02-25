@@ -47,9 +47,9 @@ static const uint8_t test_pattern_10[10] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 
 // Make sure the ring buffer denies writes that are too big
 START_TEST(ringbuf_overflow_test) {
     ringbuf_t rb;
-    __auto_free uint8_t *rb_buf = malloc(1000);
+    __auto_free uint8_t *rb_buf = malloc(1000 + 1);
     ck_assert_ptr_nonnull(rb_buf);
-    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0) == RB_SUCCESS);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000 + 1, 0) == RB_SUCCESS);
 
     // Get 1001 random bytes and try to write to the buffer
     __auto_free uint8_t *rand_buf = get_random_bytes(1001);
@@ -61,9 +61,9 @@ END_TEST
 // Make sure the ring buffer denies writes once it's full
 START_TEST(ringbuf_nospace_test) {
     ringbuf_t rb;
-    __auto_free uint8_t *rb_buf = malloc(1000);
+    __auto_free uint8_t *rb_buf = malloc(1000 + 1);
     ck_assert_ptr_nonnull(rb_buf);
-    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0) == RB_SUCCESS);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000 + 1, 0) == RB_SUCCESS);
 
     // Get 1000 random bytes and write to the buffer
     __auto_free uint8_t *rand_buf = get_random_bytes(1000 + 1 /* 1 is used later */);
@@ -90,16 +90,16 @@ END_TEST
 // Test writes that wrap from the end to the front of the buf
 START_TEST(ringbuf_write_wrap_test) {
     ringbuf_t rb;
-    __auto_free uint8_t *rb_buf = malloc(1000 + 1 /* test byte to check for overflow */);
-    rb_buf[1000] = 0x55; // Magic byte that will be compared at end
+    __auto_free uint8_t *rb_buf = malloc(1000 + 1 + 1 /* test byte to check for overflow */);
     ck_assert_ptr_nonnull(rb_buf);
-    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0) == RB_SUCCESS);
+    rb_buf[1001] = 0x55; // Magic byte that will be compared at end
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000 + 1, 0) == RB_SUCCESS);
 
-    // Write a byte and read it back to offset the start pointer by 2
+    // Write and read to offset the start pointer by 2
     const uint8_t test_bytes[2] = {0xAB, 0xCD};
     uint8_t tmp[2];
-    ck_assert(ringbuf_write(&rb, test_bytes, 1) == RB_SUCCESS);
-    ck_assert(ringbuf_read(&rb, tmp, 1) == RB_SUCCESS);
+    ck_assert(ringbuf_write(&rb, test_bytes, 2) == RB_SUCCESS);
+    ck_assert(ringbuf_read(&rb, tmp, 2) == RB_SUCCESS);
     ck_assert(test_bytes[0] == tmp[0]);
 
     // Write 998 bytes leaving two spaces left, the last of which will wrap
@@ -109,8 +109,8 @@ START_TEST(ringbuf_write_wrap_test) {
 
     // Write the two bytes and confirm that overflow occurred
     ck_assert(ringbuf_write(&rb, test_bytes, 2) == RB_SUCCESS);
-    ck_assert_msg(rb_buf[0] == test_bytes[1], "Last byte didn't wrap around as expected!");
-    ck_assert_msg(rb_buf[999] == test_bytes[0], "First byte didn't end up at end of buffer!");
+    ck_assert_msg(rb_buf[1] == test_bytes[1], "Last byte didn't wrap around as expected!");
+    ck_assert_msg(rb_buf[1000] == test_bytes[0], "First byte didn't end up at end of buffer!");
 
     // Confirm that further writes fail
     ck_assert(ringbuf_write(&rb, rand, 1) != RB_SUCCESS);
@@ -126,7 +126,7 @@ START_TEST(ringbuf_write_wrap_test) {
                   "FAILED: {0x%x, 0x%x}", tmp[0], tmp[1]);
 
     // Check magic byte
-    ck_assert(rb_buf[1000] = 0x55);
+    ck_assert(rb_buf[1001] = 0x55);
 
 }
 END_TEST
@@ -134,9 +134,9 @@ END_TEST
 // Test writes that occur after a wrap
 START_TEST(ringbuf_write_after_wrap_test) {
     ringbuf_t rb;
-    __auto_free uint8_t *rb_buf = malloc(1000);
+    __auto_free uint8_t *rb_buf = malloc(1000 + 1);
     ck_assert_ptr_nonnull(rb_buf);
-    ck_assert(ringbuf_init(&rb, rb_buf, 1000, 0) == RB_SUCCESS);
+    ck_assert(ringbuf_init(&rb, rb_buf, 1000 + 1, 0) == RB_SUCCESS);
 
     // Write a byte and read it back to offset the start pointer by 2
     const uint8_t test_bytes[2] = {0xAB, 0xCD};
@@ -203,8 +203,8 @@ void *ringbuf_blocking_write_test_client_thread(void *rb) {
 // Make sure blocking writes work as expected
 START_TEST(ringbuf_blocking_write_test) {
     ringbuf_t rb;
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_init(&rb, rb_buf, 10, 0) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_init(&rb, rb_buf, 10 + 1, 0) == RB_SUCCESS);
 
     // Fill the ring buffer up to prevent instant writes
     ck_assert(ringbuf_write(&rb, test_pattern_10, 10) == RB_SUCCESS);
@@ -255,8 +255,8 @@ void *ringbuf_blocking_read_test_client_thread(void *rb) {
 // Make sure blocking reads work as expected
 START_TEST(ringbuf_blocking_read_test) {
     ringbuf_t rb;
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_init(&rb, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_init(&rb, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     // Spawn two threads
     // - The client thread will perform a blocking read operation
@@ -276,11 +276,11 @@ END_TEST
 
 // Make sure relative buffer mode works
 START_TEST(ringbuf_relative_test) {
-    __auto_free uint8_t *rb_buf = malloc(100);
+    __auto_free uint8_t *rb_buf = malloc(100 + 1);
     ck_assert_ptr_nonnull(rb_buf);
 
     ringbuf_t rb;
-    ck_assert(ringbuf_init(&rb, rb_buf, 100, RINGBUF_FLAG_RELATIVE) == RB_SUCCESS);
+    ck_assert(ringbuf_init(&rb, rb_buf, 100 + 1, RINGBUF_FLAG_RELATIVE) == RB_SUCCESS);
 
     // Write 100 random bytes and ensure that they're in the correct position
     __auto_free uint8_t *rand = get_random_bytes(100);
@@ -335,8 +335,8 @@ void *ringbuf_eventfd_test_client_thread(void *rb) {
 // Make sure eventfd notifications work
 START_TEST(ringbuf_eventfd_test) {
     ringbuf_t rb;
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_init(&rb, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_init(&rb, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     pthread_t host_thread, client_thread;
     void *host_ret, *client_ret;
@@ -355,11 +355,11 @@ END_TEST
 START_TEST(ringbuf_sec_init_infer_test) {
     ringbuf_t rb;
     ringbuf_pub_t pub;
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10, 0) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10 + 1, 0) == RB_SUCCESS);
 
     ringbuf_t rb_i;
-    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10, 0) == RB_SUCCESS);
+    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10 + 1, 0) == RB_SUCCESS);
 
     ck_assert_msg(rb.flags == rb_i.flags, "rb.flags: 0x%x, rb_i.flags: 0x%x", rb.flags, rb_i.flags);
     ck_assert_msg(rb.size == rb_i.size, "rb.size: 0x%x, rb_i.size: 0x%x", rb.size, rb_i.size);
@@ -373,11 +373,11 @@ END_TEST
 START_TEST(ringbuf_sec_read_write_test) {
     ringbuf_t rb;
     ringbuf_pub_t pub;
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10, 0) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10 + 1, 0) == RB_SUCCESS);
 
     ringbuf_t rb_i;
-    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10, 0) == RB_SUCCESS);
+    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10 + 1, 0) == RB_SUCCESS);
 
     // Write from rb, read from rb_i
     uint8_t buf[10] = "HI__WORLD";
@@ -388,11 +388,12 @@ START_TEST(ringbuf_sec_read_write_test) {
     ck_assert_msg(ret == RB_SUCCESS, "couldn't read, res: %d", ret);
     ck_assert_msg(memcmp(buf, buf2, 10) == 0, "buf2 fail. Contents: %s", buf2);
 
-    // Write from rb_i, read from rb
+    // Do it again
     strcpy((char *)buf, "ASDF_ABCD");
-    ck_assert(ringbuf_sec_write(&rb_i, &pub, buf, 10) == RB_SUCCESS);
+    ck_assert(ringbuf_sec_write(&rb, &pub, buf, 10) == RB_SUCCESS);
 
-    ck_assert(ringbuf_sec_read(&rb, &pub, buf2, 10) == RB_SUCCESS);
+    ck_assert_msg((ret = ringbuf_sec_read(&rb_i, &pub, buf2, 10)) == RB_SUCCESS,
+                  "return code: %d", ret);
     ck_assert(memcmp(buf, buf2, 10) == 0);
 }
 END_TEST
@@ -418,11 +419,11 @@ START_TEST(ringbuf_sec_blocking_read_test) {
     ringbuf_t rb;
     ringbuf_pub_t pub;
 
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     ringbuf_t rb_i;
-    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     // Spawn a thread to write to the ringbuf and unblock it
     pthread_t thread;
@@ -459,11 +460,11 @@ START_TEST(ringbuf_sec_blocking_write_test) {
     ringbuf_t rb;
     ringbuf_pub_t pub;
 
-    uint8_t rb_buf[10];
-    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    uint8_t rb_buf[10 + 1];
+    ck_assert(ringbuf_sec_init(&rb, &pub, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     ringbuf_t rb_i;
-    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
+    ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING) == RB_SUCCESS);
 
     // Fill the buffer up initially
     ck_assert(ringbuf_sec_write(&rb_i, &pub, test_pattern_10, 10) == RB_SUCCESS);
