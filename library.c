@@ -198,7 +198,7 @@ libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
 
     ringbuf_ret_t rret;
     rret = ringbuf_sec_init(&chan->host_to_client_rb, &hdr->host_to_client_pub, data_base,
-                            rb_size, RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
+                            rb_size, RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS) {
         errno = ENOMEM;
         goto fail_malloc;
@@ -206,7 +206,7 @@ libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
 
     rret = ringbuf_sec_init(&chan->client_to_host_rb, &hdr->client_to_host_pub,
                             data_base + rb_size, rb_size,
-                            RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
+                            RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS) {
         errno = ENOMEM;
         goto fail_malloc;
@@ -256,7 +256,7 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
     // Initialize host_to_client ringbuf priv
     rret = ringbuf_sec_infer_priv(&ret->host_to_client_rb, &hdr->host_to_client_pub,
                                   (void *)data_base, rb_size,
-                                  RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
+                                  RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS)
         goto fail;
 
@@ -264,7 +264,7 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
     // Initialize client_to_host ringbuf priv
     rret = ringbuf_sec_infer_priv(&ret->client_to_host_rb, &hdr->client_to_host_pub,
                                   (void *)(data_base + rb_size), rb_size,
-                                  RINGBUF_FLAG_RELATIVE | RINGBUF_FLAG_BLOCKING);
+                                  RINGBUF_FLAG_BLOCKING);
     if (rret != RB_SUCCESS)
         goto fail;
 
