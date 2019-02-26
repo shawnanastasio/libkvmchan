@@ -106,7 +106,7 @@ ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
  * @return     ring buffer return code
  */
 ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
-                                  size_t size, uint8_t flags_mask) {
+                                     size_t size, uint8_t flags_mask) {
     // Validate the data in pub
     // Create a copy so an attacker can't modify it mid-validation
     ringbuf_pub_t pub_copy;
@@ -119,9 +119,9 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
     if (flags_mask & RINGBUF_FLAG_RELATIVE)
         return RB_SEC_FAIL;
 
-    if (pub_copy.pos_start_untrusted >= size)
+    if (pub_copy.pos_start_untrusted > size)
         return RB_SEC_FAIL;
-    if (pub_copy.pos_end_untrusted >= size)
+    if (pub_copy.pos_end_untrusted > size)
         return RB_SEC_FAIL;
     if (pub_copy.flags_untrusted & ~flags_mask)
         return RB_SEC_FAIL;
