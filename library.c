@@ -288,7 +288,7 @@ fail:
  * @param size number of bytes to write
  * @return success
  */
-bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size) {
+bool libkvmchan_write(libkvmchan_t *chan, const void *data, size_t size) {
     shmem_hdr_t *hdr = chan->shm;
     if (chan->flags & LIBKVM_FLAG_HOST) {
         // Use host_to_client ringbuffer

@@ -41,7 +41,7 @@ LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_posix(libkvmchan_shm_handle_t *hand
 LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_uio(libkvmchan_shm_handle_t *handle, const char *devname);
 LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle);
 LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle);
-LIBKVMCHAN_EXPORTED bool libkvmchan_write(libkvmchan_t *chan, void *data, size_t size);
+LIBKVMCHAN_EXPORTED bool libkvmchan_write(libkvmchan_t *chan, const void *data, size_t size);
 LIBKVMCHAN_EXPORTED bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size);
 LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(libkvmchan_t *chan);
 LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(libkvmchan_t *chan);
