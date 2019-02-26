@@ -246,6 +246,10 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
     ret->shm_size = handle->size;
 
     shmem_hdr_t *hdr = ret->shm;
+    if (hdr->magic != SHMEM_MAGIC) {
+        errno = EINVAL;
+        return NULL;
+    }
 
     // Create a reference struct for each ring buffer.
     // Since we know what parameters the ringbufs should have, we can validate the
