@@ -47,6 +47,14 @@
 // The usable space (size of ringbuf - 1)
 #define USABLE(rb) ((rb)->size - 1)
 
+const char *ringbuf_ret_names[] = {
+    "RB_SUCCESS",
+    "RB_NOSPACE",
+    "RB_NODATA",
+    "RB_OOM",
+    "RB_SEC_FAIL",
+};
+
 static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
@@ -272,9 +280,13 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
         return RB_NOSPACE;
     }
 
-    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
-    if (size == ringbuf_free_space(rb)) {
+    // If local eventfd is enabled, notify it
+    if ((rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD) && rb->eventfd > 0) {
+        uint64_t buf = 1;
+        ignore_value(write(rb->eventfd, &buf, 8));
     }
+
+    void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
 
     if (rb->pos_start <= rb->pos_end) {
         // Write from [pos_end,end) and if required,
@@ -403,6 +415,10 @@ int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
         return rb->eventfd;
     }
 
+    // If we're using a local eventfd, just return it
+    if (rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD)
+        return rb->eventfd;
+
     // Allocate data to pass to thread
     struct eventfd_thread_data *data = malloc(sizeof(struct eventfd_thread_data));
     if (!data)
@@ -421,9 +437,11 @@ int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
 }
 
 void ringbuf_clear_eventfd(ringbuf_t *rb) {
-    // Kill thread if it's still running
-    rb->kill_thread = true;
-    pthread_join(rb->eventfd_thread, NULL);
+    if (!(rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD)) {
+        // Kill thread if it's still running
+        rb->kill_thread = true;
+        pthread_join(rb->eventfd_thread, NULL);
+    }
 
     // Temporarily disable blocking and reset the eventfd's counter
     uint64_t buf;

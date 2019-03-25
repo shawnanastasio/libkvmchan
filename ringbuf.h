@@ -30,6 +30,12 @@
 #define RINGBUF_FLAG_BLOCKING (1 << 1)
 #define RINGBUF_FLAG_SEC_COPY (1 << 2)
 
+// This flag specifies that both ringbuf consumers are in the same
+// process and can notify each other using one eventfd.
+//
+// This is NOT useful for the shared memory use-case.
+#define RINGBUF_FLAG_LOCAL_EVENTFD (1 << 3)
+
 // Return codes for ringbuf functions.
 typedef enum ringbuf_ret {
     RB_SUCCESS,   // Success
@@ -96,5 +102,7 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
 int  ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub);
 void ringbuf_clear_eventfd(ringbuf_t *rb);
+
+extern const char *ringbuf_ret_names[];
 
 #endif // LIBKVMCHAN_RINGBUF_H

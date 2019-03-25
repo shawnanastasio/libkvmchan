@@ -1,16 +1,20 @@
-DEPS:=library.o ringbuf.o
+SRCS:=library.c ringbuf.c
+DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
 LIBS=-lrt -pthread
 
-DAEMON_DEPS:=daemon/daemon.o daemon/libvirt.o daemon/util.o
+DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c
+DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
 DAEMON_BIN:=kvmchand
-DAEMON_LIBS:=$(shell pkg-config --libs libvirt)
+DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)
+DAEMON_CFLAGS:=$(shell pkg-config --cflags libxml-2.0)
 
-TEST_DEPS:=test.o
+TEST_SRCS:=test.o
+TEST_DEPS:=$(TEST_SRCS:.c=.o)
 TEST_BIN:=test
 TEST_LIBS:=$(shell pkg-config --cflags --libs check)
 
-CFLAGS=-O2 -Wall -fpic -fvisibility=hidden -std=gnu99 -g -I. \
+CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wvla -fpic -fvisibility=hidden -std=gnu99 -g -I. \
 	   -fstack-protector-strong -D_FORITY_SOURCE=2
 
 COMPILER_NAME:=$(shell $(CC) --version |cut -d' ' -f1 |head -n1)
@@ -20,10 +24,13 @@ CFLAGS += -fstack-clash-protection
 endif
 
 
-.PHONY all: library daemon
+.PHONY all: library daemon build_test
 
 library: $(DEPS)
 	$(CC) -shared $(CFLAGS) $(DEPS) -o $(BIN) $(LIBS)
+
+%.daemon.o: %.c
+	$(CC) $(CFLAGS) $(DAEMON_CFLAGS) -o $@ -c $<
 
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $<

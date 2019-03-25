@@ -17,59 +17,79 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <assert.h>
+#include <ctype.h>
 
 #include "daemon-priv.h"
 
-bool vec_init(struct vec *v, size_t initial_size, void (*destructor)(void *)) {
-    if (initial_size < 10)
-        initial_size = 10;
+#define vec_template(T) \
+bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destructor)(T)) { \
+    if (initial_size < 10) \
+        initial_size = 10; \
+\
+    v->data = calloc(initial_size, sizeof(T)); \
+    if (!(v->data)) \
+        return false; \
+\
+    v->size = initial_size; \
+    v->count = 0; \
+    v->destructor = destructor; \
+    return true; \
+}; \
+\
+bool vec_ ## T ## _push_back(struct vec_ ## T *v, T element) { \
+    if (v->size == v->count) { \
+        /* double array size */ \
+        size_t new_size = v->size * 2; \
+        void *new_data = reallocarray(v->data, new_size, sizeof(T)); \
+        if (!new_data) \
+            return false; \
+        v->data = new_data; \
+        v->size = new_size; \
+    } \
+    /* insert element into array */ \
+    v->data[v->count++] = element; \
+    return true; \
+} \
+\
+T vec_ ## T ## _at(struct vec_ ## T *v, size_t i) { \
+    assert(i < v->count); \
+    return v->data[i]; \
+} \
+\
+void vec_ ## T ## _remove(struct vec_ ## T *v, size_t i) { \
+    assert(i < v->count); \
+\
+    if (v->destructor) \
+        v->destructor(v->data[i]); \
+\
+    if (i != (v->count - 1)) \
+        memmove(v->data + i, v->data + i + 1, sizeof(T) * (v->count - i - 1)); \
+    v->count -= 1; \
+} \
+void vec_ ## T ## _destroy(struct vec_ ## T *v) { \
+    size_t s = v->count; \
+    while (s-- > 0) { \
+        vec_ ## T ## _remove(v, s); \
+    } \
+    free(v->data); \
+}
 
-    v->data = calloc(initial_size, sizeof(void *));
-    if (!(v->data))
-        return false;
+vec_template(voidp)
+vec_template(int)
 
-    v->size = initial_size;
-    v->count = 0;
-    v->destructor = destructor;
-    return true;
-};
-
-bool vec_push_back(struct vec *v, void *element) {
-    if (v->size == v->count) {
-        /* double array size */
-        size_t new_size = v->size * 2;
-        void *new_data = reallocarray(v->data, new_size, sizeof(void *));
-        if (!new_data)
+// Determines if a given string is purely numerical ('0'-'9')
+bool str_is_number(const char *str) {
+    char c;
+    while((c = *str++))
+        if (!isdigit(c))
             return false;
-        v->data = new_data;
-        v->size = new_size;
-    }
-    /* insert element into array */
-    v->data[v->count++] = element;
+
     return true;
-}
-
-
-void *vec_at(struct vec *v, size_t i) {
-    assert(i < v->count);
-    return v->data[i];
-}
-
-void vec_remove(struct vec *v, size_t i) {
-    assert(i < v->count);
-
-    if (v->destructor)
-        v->destructor(v->data[i]);
-
-    if (i != (v->count - 1))
-        memmove(v->data + i, v->data + i + 1, sizeof(void *) * (v->count - i - 1));
-    v->count -= 1;
 }
 
 const char *log_level_names[] = {
@@ -88,5 +108,4 @@ void log_impl(enum log_level level, const char *file, int line, const char *fmt,
 
     va_end(args);
 }
-
 
