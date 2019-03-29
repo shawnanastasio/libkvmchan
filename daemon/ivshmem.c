@@ -64,6 +64,7 @@ struct conn_info {
 struct client_info {
     pid_t pid; // PID of qemu process
     pthread_t listener; // Listener thread handle
+    int listener_eventfd; // Eventfd to kill the listener thread
     struct vec_voidp connections; // conn_info vec
 };
 
@@ -115,6 +116,13 @@ static void conn_info_destructor(void *conn_) {
 static void client_info_destructor(void *client_) {
     struct client_info *client = client_;
     vec_voidp_destroy(&client->connections);
+
+    // Kill the listener thread
+    uint64_t buf = 1;
+    ignore_value(write(client->listener_eventfd, &buf, 8));
+    pthread_join(client->listener, NULL);
+
+    close(client->listener_eventfd);
     free(client);
 }
 
@@ -155,8 +163,10 @@ static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, 
     return new;
 }
 
-void *conn_listener_thread(void *conn_) {
-    struct conn_info *conn = conn_;
+void *conn_listener_thread(void *client_) {
+    struct client_info *client = client_;
+    // connection 0 is between the client and this daemon
+    struct conn_info *conn = client->connections.data[0];
 
     // Map shared memory region
     void *shm = mmap(NULL, DAEMON_SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -183,24 +193,43 @@ void *conn_listener_thread(void *conn_) {
                           RINGBUF_FLAG_BLOCKING))
         goto fail;
 
+    // Epoll on the peer eventfd as well as the listener kill eventfd
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        goto fail;
+    if (add_epoll_fd(epoll_fd, conn->peer_eventfd, EPOLLIN) < 0)
+        goto fail;
+    if (add_epoll_fd(epoll_fd, client->listener_eventfd, EPOLLIN) < 0)
+        goto fail;
 
     // Event loop
+    struct epoll_event events[5];
+    int event_count;
     for(;;) {
-        // Wait for notification from client
-        uint64_t buf;
-        ssize_t n = read(conn->peer_eventfd, &buf, 8);
-        if (n == 0)
-            // Client disconnect
-            goto fail;
+        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+        for (int i=0; i<event_count; i++) {
+            // Exit if event is from listener kill eventfd
+            if (events[i].data.fd == client->listener_eventfd)
+                goto fail;
 
-        log(LOGL_INFO, "Got notification from client!");
+            // Wait for notification from client
+            uint64_t buf;
+            ssize_t n = read(conn->peer_eventfd, &buf, 8);
+            if (n == 0)
+                // Client disconnect
+                goto fail;
 
-        // Strangely, qemu sets O_NONBLOCK on the eventfd on interrupt
-        // sometimes, but not always. Unset it if it was set.
-        int fd_flags = fcntl(conn->peer_eventfd, F_GETFL, 0);
-        log(LOGL_INFO, "Blocking enabled? %s", (fd_flags & O_NONBLOCK) ? "F" : "T");
-        if (fd_flags & O_NONBLOCK)
-            fcntl(conn->peer_eventfd, F_SETFL, fd_flags & ~O_NONBLOCK);
+            log(LOGL_INFO, "Got notification from client!");
+
+            // Strangely, qemu sets O_NONBLOCK on the eventfd on interrupt
+            // sometimes, but not always. Unset it if it was set.
+            int fd_flags = fcntl(conn->peer_eventfd, F_GETFL, 0);
+            log(LOGL_INFO, "Blocking enabled? %s", (fd_flags & O_NONBLOCK) ? "F" : "T");
+            if (fd_flags & O_NONBLOCK)
+                fcntl(conn->peer_eventfd, F_SETFL, fd_flags & ~O_NONBLOCK);
+
+            // Interrupt the guest
+        }
     }
 
 fail:
@@ -216,10 +245,12 @@ fail:
  * @return success?
  */
 static bool spawn_conn_listener_thread(struct client_info *client) {
-    // connection 1 is between the client and this daemon
-    struct conn_info *conn1 = client->connections.data[0];
 
-    if (pthread_create(&client->listener, NULL, conn_listener_thread, conn1))
+    client->listener_eventfd = eventfd(0, 0);
+    if (client->listener_eventfd < 0)
+        return false;
+
+    if (pthread_create(&client->listener, NULL, conn_listener_thread, client))
         return false;
 
     return true;
@@ -239,6 +270,7 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
     if (!info)
         return -1;
 
+#if 0
     // Get Domain ID from libvirt thread
     unsigned int id;
     if (!get_domain_id_by_pid(cred.pid, &id)) {
@@ -252,6 +284,9 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
                 "Rejecting client.", id);
         return -1;
     }
+#endif
+    // ID is always 1 and the peer is always 0
+    uint16_t id = 1;
 
     // Create an entry for this connection in the client_info
     struct conn_info *conn = malloc_w(sizeof(struct conn_info));
@@ -364,6 +399,10 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
     if (bind(socfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_un)) < 0)
         goto error;
 
+    // Set proper permissions on the socket
+    if (chmod(sock_path, 0777) < 0)
+        goto error;
+
     // Install onexit handler to remove socket
     on_exit(cleanup_socket_path, (void *)sock_path);
 
@@ -389,7 +428,7 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
 
     for(;;) {
         event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-        for(size_t i=0; i<event_count; i++) {
+        for(int i=0; i<event_count; i++) {
             if (events[i].data.fd == socfd) {
                 // Connection request on the socket, accept it
                 int fd = accept(socfd, NULL, NULL);
