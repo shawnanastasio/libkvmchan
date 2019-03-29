@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <endian.h>
 #include <pthread.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -41,6 +42,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 // Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
 #if __has_include(<sys/memfd.h>)
@@ -192,6 +194,13 @@ void *conn_listener_thread(void *conn_) {
             goto fail;
 
         log(LOGL_INFO, "Got notification from client!");
+
+        // Strangely, qemu sets O_NONBLOCK on the eventfd on interrupt
+        // sometimes, but not always. Unset it if it was set.
+        int fd_flags = fcntl(conn->peer_eventfd, F_GETFL, 0);
+        log(LOGL_INFO, "Blocking enabled? %s", (fd_flags & O_NONBLOCK) ? "F" : "T");
+        if (fd_flags & O_NONBLOCK)
+            fcntl(conn->peer_eventfd, F_SETFL, fd_flags & ~O_NONBLOCK);
     }
 
 fail:
