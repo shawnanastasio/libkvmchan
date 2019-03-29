@@ -179,12 +179,22 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
         free(result);
         return false;
     }
+    if (!strstr(result, "\"return\":{}")) {
+        log(LOGL_ERROR, "QEMU rejected chardev: %s", result);
+        free(result);
+        return false;
+    }
     free(result);
 
     // Create new ivshmem device
     snprintf(buf, sizeof(buf), qmp_new_ivshmem_format, index);
     if (virDomainQemuMonitorCommand(dom, buf, &result, 0) < 0) {
         log(LOGL_ERROR, "Failed to attach ivshmem device to dom: %s", result);
+        free(result);
+        return false;
+    }
+    if (!strstr(result, "\"return\":{}")) {
+        log(LOGL_ERROR, "QEMU rejected ivshmem device: %s", result);
         free(result);
         return false;
     }
@@ -265,10 +275,6 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             }
             log(LOGL_INFO, "Got PID: %d", info->pid);
 
-            sem_wait(&running_domains_sem);
-            vec_voidp_push_back(&running_domains, info);
-            sem_post(&running_domains_sem);
-
             // Create a new ivshmem device on the guest
             // that will be used for guest<->kvmchand communication
             if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, 0)) {
@@ -276,6 +282,12 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
                 free(info);
                 break;
             }
+
+            // Add VM to list of running domains
+            sem_wait(&running_domains_sem);
+            vec_voidp_push_back(&running_domains, info);
+            sem_post(&running_domains_sem);
+
 
             break;
         case VIR_DOMAIN_EVENT_STOPPED:
