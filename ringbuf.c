@@ -17,8 +17,6 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "ringbuf.h"
-
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
@@ -28,21 +26,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "ringbuf.h"
+#include "libkvmchan-priv.h"
+
 #define MAX(x, y) ((x > y) ? (x) : (y))
 #define MIN(x, y) ((x > y) ? (y) : (x))
 
 // A way to temporarily yield to the OS while waiting for a blocking operation
 // TODO: is this optimal performance-wise?
 #define BUSYWAIT_YIELD_TO_OS() usleep(1)
-
-// Ignore unused variable/return warnings. Especially for eventfd actions that can't fail.
-// This macro was taken from gnulib.
-#if 3 < __GNUC__ + (4 <= __GNUC_MINOR__)
-# define ignore_value(x) \
-    (__extension__ ({ __typeof__ (x) __x = (x); (void) __x; }))
-#else
-# define ignore_value(x) ((void) (x))
-#endif
 
 // The usable space (size of ringbuf - 1)
 #define USABLE(rb) ((rb)->size - 1)

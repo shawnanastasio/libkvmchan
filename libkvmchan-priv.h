@@ -81,5 +81,17 @@ typedef struct shmem_hdr {
 #define DAEMON_H2C_OFFSET (sizeof(shmem_hdr_t))
 #define DAEMON_C2H_OFFSET (DAEMON_H2C_OFFSET + DAEMON_RING_SIZE)
 
+/* Macros */
+
+// Ignore unused variable/return warnings.
+// Especially for eventfd actions that can't fail.
+// This macro was taken from gnulib.
+#if 3 < __GNUC__ + (4 <= __GNUC_MINOR__)
+# define ignore_value(x) \
+    (__extension__ ({ __typeof__ (x) __x = (x); (void) __x; }))
+#else
+# define ignore_value(x) ((void) (x))
+#endif
+
 
 #endif // LIBKVMCHAN_PRIV_H
