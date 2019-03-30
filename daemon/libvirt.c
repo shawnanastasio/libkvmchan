@@ -426,6 +426,13 @@ int run_libvirt_loop(ringbuf_t *rb, const char *host_uri) {
                 return -1;
             }
 
+            // Create a new ivshmem device on the guest
+            // that will be used for guest<->kvmchand communication
+            if (!attach_ivshmem_device(p, IVSHMEM_SOCK_PATH, 0)) {
+                log(LOGL_WARN, "Failed to attach ivshmem device!");
+                return -1;
+            }
+
             assert(vec_voidp_push_back(&running_domains, info));
         }
         free(domains);
