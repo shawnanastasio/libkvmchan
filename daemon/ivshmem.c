@@ -214,10 +214,7 @@ void *conn_listener_thread(void *client_) {
 
             // Wait for notification from client
             uint64_t buf;
-            ssize_t n = read(conn->peer_eventfd, &buf, 8);
-            if (n == 0)
-                // Client disconnect
-                goto fail;
+            ignore_value(read(conn->peer_eventfd, &buf, 8));
 
             log(LOGL_INFO, "Got notification from client!");
 
@@ -229,6 +226,9 @@ void *conn_listener_thread(void *client_) {
                 fcntl(conn->peer_eventfd, F_SETFL, fd_flags & ~O_NONBLOCK);
 
             // Interrupt the guest
+            buf = 1;
+            ignore_value(write(conn->eventfd, &buf, 8));
+            log(LOGL_INFO, "Interrupted guest!\n");
         }
     }
 
