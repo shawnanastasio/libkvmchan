@@ -73,13 +73,13 @@ struct ivshmem_server {
     struct vec_voidp clients; // client_info vec
 };
 
-static ssize_t send_ivshmem_msg(int socfd, uint64_t msg, int fd) {
+static ssize_t send_ivshmem_msg(int socfd, int64_t msg, int fd) {
     union {
         char cmsgbuf[CMSG_SPACE(sizeof(int))];
         struct cmsghdr align;
     } u;
 
-    uint64_t buf = htole64(msg); // ivshmem spec mandates LE
+    int64_t buf = htole64(msg); // ivshmem spec mandates LE
     struct cmsghdr *cmsg;
     struct iovec iov = { .iov_base = &buf, .iov_len = 8 };
     struct msghdr msgh = {
