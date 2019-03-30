@@ -167,7 +167,7 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
 
     // A QMP command to add a new ivshmem device with format %d (index)
     const char qmp_new_ivshmem_format[] = "{\"execute\":\"device_add\", \"arguments\": {\"driver\": "
-        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\"}}";
+        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 1}}";
 
     char buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
     char *result;
