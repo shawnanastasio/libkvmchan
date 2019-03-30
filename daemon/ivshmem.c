@@ -51,7 +51,8 @@
 int memfd_create(const char *name, unsigned int flags);
 #endif
 
-#include "daemon-priv.h"
+#include "util.h"
+#include "ivshmem.h"
 #include "libkvmchan-priv.h"
 
 struct conn_info {

@@ -44,7 +44,8 @@
 #include <libxml/tree.h>
 #include <libxml/xpath.h>
 
-#include "daemon-priv.h"
+#include "util.h"
+#include "libvirt.h"
 
 struct domain_info {
     char uuid_str[VIR_UUID_STRING_BUFLEN];

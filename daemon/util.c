@@ -24,7 +24,7 @@
 #include <assert.h>
 #include <ctype.h>
 
-#include "daemon-priv.h"
+#include "util.h"
 
 #define vec_template(T) \
 bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destructor)(T)) { \

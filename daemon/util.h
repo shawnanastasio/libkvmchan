@@ -17,13 +17,11 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KVMCHAN_DAEMON_PRIV_H
-#define KVMCHAN_DAEMON_PRIV_H
+#ifndef KVMCHAND_UTIL_H
+#define KVMCHAND_UTIL_H
 
 #include <stdlib.h>
 #include <stdbool.h>
-
-#include "ringbuf.h"
 
 #define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
 
@@ -75,18 +73,4 @@ bool str_is_number(const char *str);
 int add_epoll_fd(int epoll_fd, int fd, int event);
 int del_epoll_fd(int epoll_fd, int fd);
 
-/// libvirt.c
-int run_libvirt_loop(ringbuf_t *rb, const char *host_uri);
-bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out);
-
-/// ivshmem.c
-int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path);
-
-// Structs used for Main<->Libvirt event loop communication
-struct libvirt_event {
-    uint8_t type;
-#define LVE_TYPE_STARTED 0 // VM started
-#define LVE_TYPE_STOPPED 1 // VM stopped
-};
-
-#endif // KVMCHAN_DAEMON_PRIV_H
+#endif // KVMCHAN_UTIL_H

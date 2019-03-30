@@ -38,7 +38,9 @@
 #include <sys/stat.h>
 #include <sys/epoll.h>
 
-#include "daemon-priv.h"
+#include "util.h"
+#include "libvirt.h"
+#include "ivshmem.h"
 #include "ringbuf.h"
 
 // TODO: Support proper authentication and different libvirt hosts
