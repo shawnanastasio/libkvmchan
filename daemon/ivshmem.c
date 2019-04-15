@@ -219,13 +219,6 @@ void *conn_listener_thread(void *client_) {
 
             log(LOGL_INFO, "Got notification from client!");
 
-            // Strangely, qemu sets O_NONBLOCK on the eventfd on interrupt
-            // sometimes, but not always. Unset it if it was set.
-            int fd_flags = fcntl(conn->peer_eventfd, F_GETFL, 0);
-            log(LOGL_INFO, "Blocking enabled? %s", (fd_flags & O_NONBLOCK) ? "F" : "T");
-            if (fd_flags & O_NONBLOCK)
-                fcntl(conn->peer_eventfd, F_SETFL, fd_flags & ~O_NONBLOCK);
-
             // Interrupt the guest
             buf = 1;
             ignore_value(write(conn->eventfd, &buf, 8));
