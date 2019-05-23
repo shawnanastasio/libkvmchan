@@ -33,6 +33,12 @@ enum log_level {
     LOGL_ERROR
 };
 
+enum loop_msg_type {
+    LOOP_MSG_MAIN, // Message from main loop
+    LOOP_MSG_LIBVIRT, // Message from libvirt loop
+    LOOP_MSG_IVSHMEM, // Message from ivshmem loop
+};
+
 #ifdef __GNUC__
 #define log(level, fmt, ...) log_impl(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #else
@@ -44,6 +50,7 @@ void log_impl(enum log_level level, const char *file, int line, const char *fmt,
 typedef void * voidp;
 
 #define vec_template_proto(T) \
+typedef int (*T ## _comparator)(T, T); \
 struct vec_## T { \
     T *data; \
     size_t size; \
@@ -54,11 +61,13 @@ bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destruc
 bool vec_ ## T ## _push_back(struct vec_ ## T *v, T element); \
 T vec_ ## T ## _at(struct vec_ ## T *v, size_t i); \
 void vec_ ## T ## _remove(struct vec_ ## T *v, size_t i); \
-void vec_ ## T ## _destroy(struct vec_ ## T *v);
+void vec_ ## T ## _destroy(struct vec_ ## T *v); \
+bool vec_ ## T ## _contains(struct vec_ ## T *v, T element, T ## _comparator comparator);
 
 vec_template_proto(voidp)
 vec_template_proto(int)
 
+void free_destructor(void *element);
 bool str_is_number(const char *str);
 
 // Malloc wrapper that will crash on failure
@@ -66,6 +75,7 @@ bool str_is_number(const char *str);
     void *ret = malloc((n)); \
     if (!ret) {\
         log(LOGL_ERROR, "malloc failed!"); \
+        bail_out(); \
     } \
     ret; \
 })
@@ -73,4 +83,8 @@ bool str_is_number(const char *str);
 int add_epoll_fd(int epoll_fd, int fd, int event);
 int del_epoll_fd(int epoll_fd, int fd);
 
-#endif // KVMCHAN_UTIL_H
+bool install_exit_callback(void (*func)(void*), void *arg);
+void run_exit_callbacks(void);
+void bail_out(void);
+
+#endif // KVMCHAND_UTIL_H

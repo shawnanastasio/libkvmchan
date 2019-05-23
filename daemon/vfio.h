@@ -17,21 +17,9 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KVMCHAND_LIBVIRT_H
-#define KVMCHAND_LIBVIRT_H
+#ifndef KVMCHAND_VFIO_H
+#define KVMCHAND_VFIO_H
 
-#include <stdbool.h>
+void run_vfio_loop(int mainsoc);
 
-#include "ringbuf.h"
-
-void run_libvirt_loop(int mainsoc, int ivshmemsoc, const char *host_uri);
-//bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out);
-
-// Structs used for Main<->Libvirt event loop communication
-struct libvirt_event {
-    uint8_t type;
-#define LVE_TYPE_STARTED 0 // VM started
-#define LVE_TYPE_STOPPED 1 // VM stopped
-};
-
-#endif // KVMCHAND_LIBVIRT_H
+#endif // KVMCHAND_VFIO_H

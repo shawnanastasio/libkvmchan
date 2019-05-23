@@ -17,21 +17,20 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KVMCHAND_LIBVIRT_H
-#define KVMCHAND_LIBVIRT_H
+/**
+ * This file contains platform-specific configuration options
+ */
 
-#include <stdbool.h>
+#ifndef KVMCHAND_CONFIG_H
+#define KVMCHAND_CONFIG_H
 
-#include "ringbuf.h"
+// VFIO mode configuration
+#if defined(__powerpc64__) && !defined(PPC64_FORCE_NOIOMMU)
+    // On ppc64, we have a vIOMMU
+    #define USE_VFIO_SPAPR 1
+#else
+    // On other platforms, fallback to NOIOMMU
+    #define USE_VFIO_NOIOMMU 1
+#endif
 
-void run_libvirt_loop(int mainsoc, int ivshmemsoc, const char *host_uri);
-//bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out);
-
-// Structs used for Main<->Libvirt event loop communication
-struct libvirt_event {
-    uint8_t type;
-#define LVE_TYPE_STARTED 0 // VM started
-#define LVE_TYPE_STOPPED 1 // VM stopped
-};
-
-#endif // KVMCHAND_LIBVIRT_H
+#endif // KVMCHAND_CONFIG_H

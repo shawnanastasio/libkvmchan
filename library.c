@@ -163,6 +163,7 @@ fail:
  * @return A libkvmchan_t struct, or NULL on error
  */
 libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
+#if 0
     // Allocate a libkvmchan_t structure
     libkvmchan_t *chan = malloc(sizeof(libkvmchan_t));
     if (!chan)
@@ -209,6 +210,7 @@ fail_malloc:
     free(chan);
 fail:
     return NULL;
+#endif
 }
 
 
@@ -224,6 +226,7 @@ fail:
  * @return A libkvmchan_t struct, or NULL on error
  */
 libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
+#if 0
     ringbuf_ret_t rret;
 
     // Allocate libkvmchan_t struct
@@ -275,6 +278,7 @@ fail:
         errno = EINVAL;
 
     return NULL;
+#endif
 }
 
 /**

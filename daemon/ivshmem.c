@@ -55,11 +55,21 @@ int memfd_create(const char *name, unsigned int flags);
 #include "ivshmem.h"
 #include "libkvmchan-priv.h"
 
+struct ringbuf_conn_data {
+    ringbuf_t host_to_client_rb;
+    ringbuf_t client_to_host_rb;
+    shmem_hdr_t *hdr;
+};
+
 struct conn_info {
     int socfd; // Socket file descriptor
     int shmfd; // Shared memory file descriptor
-    int eventfd; // eventfd used to notify this ivshmem device
-    int peer_eventfd; // eventfd this ivshmem device may notify
+
+    int incoming_eventfds[NUM_EVENTFDS]; // eventfds used by client to notify us
+    int outgoing_eventfds[NUM_EVENTFDS]; // eventfds used by us to notify client
+
+    // Ringbuffer structures and
+    struct ringbuf_conn_data data;
 };
 
 struct client_info {
@@ -109,8 +119,10 @@ static void conn_info_destructor(void *conn_) {
     struct conn_info *conn = conn_;
     close(conn->socfd);
     close(conn->shmfd);
-    close(conn->eventfd);
-    close(conn->peer_eventfd);
+    for (size_t i=0; i<NUM_EVENTFDS; i++) {
+        close(conn->incoming_eventfds[i]);
+        close(conn->outgoing_eventfds[i]);
+    }
     free(conn);
 }
 
@@ -127,9 +139,16 @@ static void client_info_destructor(void *client_) {
     free(client);
 }
 
-static void cleanup_socket_path(int status, void *path_) {
+static void cleanup_socket_path(void *path_) {
     const char *path = path_;
     unlink(path);
+}
+
+static bool handle_loop_message(int fd, enum loop_msg_type type) {
+    log(LOGL_INFO, "Got message from other loop!");
+
+    // TODO: implement me
+    return true;
 }
 
 static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, bool makenew,
@@ -164,7 +183,37 @@ static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, 
     return new;
 }
 
-void *conn_listener_thread(void *client_) {
+static bool handle_kvmchand_message(struct conn_info *conn) {
+    struct kvmchand_message msg;
+    if (RB_SUCCESS != ringbuf_sec_read(&conn->data.client_to_host_rb, &conn->data.hdr->client_to_host_pub,
+                                       &msg, sizeof(struct kvmchand_message))) {
+        log(LOGL_ERROR, "Failed to receive message from client kvmchand!");
+        return false;
+    }
+
+    // Handle command and send response
+    struct kvmchand_ret ret;
+    switch(msg.command) {
+        case KVMCHAND_CMD_HELLO:
+            ret.ret = KVMCHAND_API_VERSION;
+            break;
+
+        default:
+            /* unimplemented */
+            ret.ret = -1;
+            break;
+    }
+
+    if (RB_SUCCESS != ringbuf_sec_write(&conn->data.host_to_client_rb, &conn->data.hdr->host_to_client_pub,
+                                        &ret, sizeof(struct kvmchand_ret))) {
+        log(LOGL_ERROR, "Failed to receive message from client kvmchand!");
+        return false;
+    }
+
+    return true;
+}
+
+static void *conn_listener_thread(void *client_) {
     struct client_info *client = client_;
     // connection 0 is between the client and this daemon
     struct conn_info *conn = client->connections.data[0];
@@ -177,31 +226,32 @@ void *conn_listener_thread(void *client_) {
         return NULL;
     }
     shmem_hdr_t *hdr = shm;
-
-    //rret = ringbuf_sec_init(&chan->host_to_client_rb, &hdr->host_to_client_pub, data_base,
-    //                        rb_size, RINGBUF_FLAG_BLOCKING);
+    hdr->magic = SHMEM_MAGIC;
 
     // Setup ring buffers
-    ringbuf_t host_to_client_rb, client_to_host_rb;
-    hdr->magic = SHMEM_MAGIC;
-    if (RB_SUCCESS != ringbuf_sec_init(&host_to_client_rb, &hdr->host_to_client_pub,
+    conn->data.hdr = hdr;
+    if (RB_SUCCESS != ringbuf_sec_init(&conn->data.host_to_client_rb, &hdr->host_to_client_pub,
                           (uint8_t *)shm + DAEMON_H2C_OFFSET, DAEMON_RING_SIZE,
-                          RINGBUF_FLAG_BLOCKING))
+                          RINGBUF_FLAG_BLOCKING, RINGBUF_DIRECTION_WRITE,
+                          conn->incoming_eventfds[0], conn->outgoing_eventfds[0]))
         goto fail;
 
-    if (RB_SUCCESS != ringbuf_sec_init(&client_to_host_rb, &hdr->client_to_host_pub,
+    if (RB_SUCCESS != ringbuf_sec_init(&conn->data.client_to_host_rb, &hdr->client_to_host_pub,
                           (uint8_t *)shm + DAEMON_C2H_OFFSET, DAEMON_RING_SIZE,
-                          RINGBUF_FLAG_BLOCKING))
+                          RINGBUF_FLAG_BLOCKING, RINGBUF_DIRECTION_READ,
+                          conn->incoming_eventfds[1], conn->outgoing_eventfds[1]))
         goto fail;
 
-    // Epoll on the peer eventfd as well as the listener kill eventfd
+    // Epoll on the incoming eventfds as well as the listener kill eventfd
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0)
         goto fail;
-    if (add_epoll_fd(epoll_fd, conn->peer_eventfd, EPOLLIN) < 0)
-        goto fail;
+    for (size_t i=0; i<NUM_EVENTFDS; i++) {
+        if (add_epoll_fd(epoll_fd, conn->incoming_eventfds[i], EPOLLIN) < 0)
+            goto fail_epoll_create;
+    }
     if (add_epoll_fd(epoll_fd, client->listener_eventfd, EPOLLIN) < 0)
-        goto fail;
+        goto fail_epoll_create;
 
     // Event loop
     struct epoll_event events[5];
@@ -209,23 +259,21 @@ void *conn_listener_thread(void *client_) {
     for(;;) {
         event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
         for (int i=0; i<event_count; i++) {
+            int cur_fd = events[i].data.fd;
+
             // Exit if event is from listener kill eventfd
-            if (events[i].data.fd == client->listener_eventfd)
-                goto fail;
+            if (cur_fd == client->listener_eventfd)
+                goto fail_epoll_create;
 
-            // Wait for notification from client
-            uint64_t buf;
-            ignore_value(read(conn->peer_eventfd, &buf, 8));
-
-            log(LOGL_INFO, "Got notification from client!");
-
-            // Interrupt the guest
-            buf = 1;
-            ignore_value(write(conn->eventfd, &buf, 8));
-            log(LOGL_INFO, "Interrupted guest!\n");
+            if (!handle_kvmchand_message(conn)) {
+                log(LOGL_ERROR, "Couldn't handle message from client! Continuing...");
+                continue;
+            }
         }
     }
 
+fail_epoll_create:
+    close(epoll_fd);
 fail:
     log(LOGL_INFO, "Stopping listener thread.");
     munmap(shm, DAEMON_SHM_SIZE);
@@ -279,12 +327,17 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
         return -1;
     }
 #endif
-    // ID is always 1 and the peer is always 0
-    uint16_t id = 1;
+    // ID that corresponds to the IVPosition register.
+    // For the first connection, id is always 1.
+    int64_t id;
 
     // Create an entry for this connection in the client_info
     struct conn_info *conn = malloc_w(sizeof(struct conn_info));
-    conn->socfd = -1; conn->shmfd = -1; conn->eventfd = -1; conn->peer_eventfd = -1;
+    conn->socfd = -1; conn->shmfd = -1;
+    int eventfds[NUM_EVENTFDS * 2];
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
+        eventfds[i] = -1; // Initialize to -1 to make cleanup easier
+
     bool first_conn = false;
     if (info->connections.count == 0) {
         first_conn = true;
@@ -295,15 +348,19 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
         if (ftruncate(conn->shmfd, DAEMON_SHM_SIZE) < 0)
             goto fail_malloc_conn;
 
-        // Allocate an eventfd for interrupting this ivshmem device
-        if ((conn->eventfd = eventfd(0, 0)) < 0)
-            goto fail_malloc_conn;
+        // Allocate eventfds
+        for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+            if ((eventfds[i] = eventfd(0, 0)) < 0)
+                goto fail_malloc_conn;
 
-        // Allocate an eventfd that can be used to notify this daemon
-        if ((conn->peer_eventfd = eventfd(0, 0)) < 0) {
-            close(conn->eventfd);
-            goto fail_malloc_conn;
+            if (i < NUM_EVENTFDS)
+                conn->incoming_eventfds[i] = eventfds[i];
+            else
+                conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
         }
+
+        // Set IVPosition to 1
+        id = 1;
     } else {
         // TODO
         log(LOGL_ERROR, "Unimplemented!");
@@ -313,7 +370,6 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
 
     if (!vec_voidp_push_back(&info->connections, conn))
         goto fail_malloc_conn;
-
 
     // Send information to client
     if (send_ivshmem_msg(fd, 0, -1) < 0) // Protocol version (0)
@@ -325,11 +381,15 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
     if (send_ivshmem_msg(fd, -1, conn->shmfd) < 0) // shm fd
         goto fail_malloc_conn;
 
-    if (send_ivshmem_msg(fd, 0, conn->peer_eventfd) < 0) // peer eventfd (always id=0)
-        goto fail_malloc_conn;
+    for (size_t i=0; i<NUM_EVENTFDS; i++) {
+        if (send_ivshmem_msg(fd, 0, conn->incoming_eventfds[i]) < 0) // peer eventfds (always id=0)
+            goto fail_malloc_conn;
+    }
 
-    if (send_ivshmem_msg(fd, id, conn->eventfd) < 0) // Interrupt eventfd
-        goto fail_malloc_conn;
+    for (size_t i=0; i<NUM_EVENTFDS; i++) {
+        if (send_ivshmem_msg(fd, id, conn->outgoing_eventfds[i]) < 0) // outgoing eventfds
+            goto fail_malloc_conn;
+    }
 
     // If this is the first connection for the client,
     // spawn a listener thread
@@ -341,8 +401,10 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
 fail_malloc_conn:
     if (conn->socfd >= 0) close(conn->socfd);
     if (conn->shmfd >= 0) close(conn->shmfd);
-    if (conn->eventfd >= 0) close(conn->eventfd);
-    if (conn->peer_eventfd >= 0) close(conn->peer_eventfd);
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
+        if (eventfds[i] > 0)
+            close(eventfds[i]);
+
     free(conn);
 
     return -1;
@@ -382,7 +444,7 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
     return true;
 }
 
-int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
+void run_ivshmem_loop(int mainsoc, int libvirtsoc, const char *sock_path) {
     // Set up the socket and bind it to the given path
     int socfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socfd < 0)
@@ -397,8 +459,9 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
     if (chmod(sock_path, 0777) < 0)
         goto error;
 
-    // Install onexit handler to remove socket
-    on_exit(cleanup_socket_path, (void *)sock_path);
+    // Install exit handler to remove socket
+    if (!install_exit_callback(cleanup_socket_path, (void *)sock_path))
+        goto error;
 
     // Start listening
     if (listen(socfd, 5) < 0)
@@ -409,6 +472,10 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
     if (epoll_fd < 0)
         goto error;
     if (add_epoll_fd(epoll_fd, socfd, EPOLLIN) < 0)
+        goto error;
+    if (add_epoll_fd(epoll_fd, mainsoc, EPOLLIN) < 0)
+        goto error;
+    if (add_epoll_fd(epoll_fd, libvirtsoc, EPOLLIN) < 0)
         goto error;
 
     // Initialize ivshmem_server
@@ -437,6 +504,12 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
                     log(LOGL_WARN, "Couldn't add fd to epoll set: %m");
                     goto error;
                 }
+            } else if (events[i].data.fd == mainsoc || events[i].data.fd == libvirtsoc) {
+                int fd = events[i].data.fd;
+                bool ret = handle_loop_message(events[i].data.fd, fd == mainsoc ? LOOP_MSG_MAIN :
+                                                        LOOP_MSG_LIBVIRT);
+                if (!ret)
+                    goto error;
             } else {
                 // Event from a client fd, check if it was closed
                 int fd = events[i].data.fd;
@@ -444,7 +517,8 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
                 ssize_t n = read(fd, buf, 1);
                 if (n != 0) {
                     log(LOGL_ERROR, "Received unknown message from client on fd %d", fd);
-                    goto error;
+                    continue;
+                    //goto error;
                 }
 
                 // Client disconnected
@@ -465,5 +539,5 @@ int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path) {
 
 error:
     log(LOGL_ERROR, "ivshmem server encountered fatal error: %m!");
-    return -1;
+    bail_out();
 }

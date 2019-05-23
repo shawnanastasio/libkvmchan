@@ -37,11 +37,14 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
 
 #include "util.h"
 #include "libvirt.h"
 #include "ivshmem.h"
 #include "ringbuf.h"
+#include "vfio.h"
 
 // TODO: Support proper authentication and different libvirt hosts
 #define LIBVIRT_HOST_URI "qemu:///system"
@@ -52,27 +55,8 @@ struct thread_loop_data {
     void *param;
 };
 
-static void *spawn_libvirt_loop(void *data_) {
-    struct thread_loop_data *data = data_;
-
-    int ret = run_libvirt_loop(data->rb, data->param);
-    log(LOGL_ERROR, "libvirt loop exited with error: %d", ret);
-    exit(EXIT_FAILURE);
-
-    /*NOTREACHED*/
-    return NULL;
-}
-
-static void *spawn_ivshmem_loop(void *data_) {
-    struct thread_loop_data *data = data_;
-
-    int ret = run_ivshmem_loop(data->rb, data->param);
-    log(LOGL_ERROR, "ivshmem loop exited with error: %d", ret);
-    exit(EXIT_FAILURE);
-
-    /*NOTREACHED*/
-    return NULL;
-}
+static void host_main(void);
+static void guest_main(void);
 
 /// Helper functions
 
@@ -84,7 +68,7 @@ static void daemonize() {
         exit(EXIT_FAILURE);
     } else if (child > 0) {
         // Child forked successfully, parent can exit
-        exit(EXIT_SUCCESS);
+        _exit(EXIT_SUCCESS);
     }
 
     // Change the file mode mask
@@ -109,43 +93,48 @@ static void daemonize() {
     close(STDERR_FILENO);
 }
 
-void show_help(const char *progname) {
-    fprintf(stderr, "Usage: %s [-h|-d]\n", progname);
+static void show_usage(const char *progname) {
+    printf("Usage: %s [-h|-d|-g]\n", progname);
 }
 
-int add_epoll_fd(int epoll_fd, int fd, int event) {
-    struct epoll_event ep_event = {
-        .events = event,
-        .data = {
-            .fd = fd
-        }
-    };
+static void show_help(const char *progname) {
+    show_usage(progname);
+    printf("Start the kvmchand daemon\n\n");
 
-    return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ep_event);
+    printf("  -h       Show this help screen\n");
+    printf("  -d       Run as a daemon\n");
+    printf("  -g       Run in guest mode\n");
 }
 
-int del_epoll_fd(int epoll_fd, int fd) {
-    struct epoll_event ep_event = {
-        .data = {
-            .fd = fd
-        }
-    };
-
-    return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ep_event);
-}
-
-void sigint_handler(int sig) {
+static void sigint_handler(int sig) {
     (void)sig;
 
-    // Call exit(2) to execute all on_exit(2) callbacks
-    exit(EXIT_FAILURE);
+    run_exit_callbacks();
+    _exit(EXIT_FAILURE);
+}
+
+static void sighup_handler(int sig) {
+    (void)sig;
+
+    run_exit_callbacks();
+    _exit(EXIT_FAILURE);
+}
+
+static void sigchld_handler(int sig) {
+    (void)sig;
+
+    log(LOGL_ERROR, "ERROR: Child unexpectedly died!");
+
+    run_exit_callbacks();
+    _exit(EXIT_FAILURE);
 }
 
 /// Entry point, main event loop
 int main(int argc, char **argv) {
     bool daemon = false;
+    bool guest = false;
     int opt;
-    while ((opt = getopt(argc, argv, "hd")) != -1) {
+    while ((opt = getopt(argc, argv, "hdg")) != -1) {
         switch(opt) {
             case 'h':
                 show_help(argv[0]);
@@ -155,9 +144,13 @@ int main(int argc, char **argv) {
                 daemon = true;
                 break;
 
+            case 'g':
+                guest = true;
+                break;
+
             default:
                 fprintf(stderr, "Unknown argument!\n");
-                show_help(argv[0]);
+                show_usage(argv[0]);
                 return EXIT_FAILURE;
         }
     }
@@ -171,65 +164,102 @@ int main(int argc, char **argv) {
     struct sigaction sa = {
         .sa_handler = sigint_handler,
     };
-
     if (sigaction(SIGINT, &sa, NULL) < 0) {
         log(LOGL_ERROR, "Failed to install SIGINT handler: %m");
         return EXIT_FAILURE;
     }
 
-    // Create ringbufs for communicating with libvirt and ivshmem event loops
-    ringbuf_t libvirt_rb, ivshmem_rb;
-    int libvirt_eventfd, ivshmem_eventfd;
-    const uint8_t rb_flags = RINGBUF_FLAG_BLOCKING | RINGBUF_FLAG_LOCAL_EVENTFD;
-    void *libvirt_rb_buf = malloc_w(1024 + 1);
-    void *ivshmem_rb_buf = malloc_w(1024 + 1);
-
-    ringbuf_init(&libvirt_rb, libvirt_rb_buf, 1024 + 1, rb_flags);
-    ringbuf_init(&ivshmem_rb, ivshmem_rb_buf, 1024 + 1, rb_flags);
-
-    if ((libvirt_eventfd = ringbuf_get_eventfd(&libvirt_rb, NULL)) < 0) {
-        log(LOGL_ERROR, "Failed to obtain eventfd for libvirt ringbuf!");
+    // Install SIGCHLD handler
+    sa.sa_handler = sigchld_handler;
+    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+        log(LOGL_ERROR, "Failed to install SIGCHLD handler: %m");
         return EXIT_FAILURE;
     }
 
-    if ((ivshmem_eventfd = ringbuf_get_eventfd(&ivshmem_rb, NULL)) < 0) {
-        log(LOGL_ERROR, "Failed to obtain eventfd for ivshmem ringbuf!");
+    // Install SIGHUP handler
+    sa.sa_handler = sighup_handler;
+    if (sigaction(SIGHUP, &sa, NULL) < 0) {
+        log(LOGL_ERROR, "Failed to install SIGHUP handler: %m");
         return EXIT_FAILURE;
     }
+    // Start daemon
+    if (guest)
+        guest_main();
+    else
+        host_main();
 
-    // Spawn threads for the two event loops
-    pthread_t libvirt_thread, ivshmem_thread;
-    int ret;
+    /*NOTREACHED*/
+    return EXIT_FAILURE;
+}
 
-    struct thread_loop_data libvirt_data = { &libvirt_rb, LIBVIRT_HOST_URI };
-    if ((ret = pthread_create(&libvirt_thread, NULL, &spawn_libvirt_loop, &libvirt_data))) {
-        log(LOGL_ERROR, "Failed to spawn libvirt thread: %s", strerror(ret));
-        return EXIT_FAILURE;
+// Entry point for daemon when run in host mode
+static void host_main(void) {
+    // Spawn processes for libvirt and ivshmem event loops.
+    // Having multiple processes allows for more granular
+    // security sandboxing and increases isolation.
+
+    // Create socketpairs for IPC
+    int main_libvirt_sv[2], main_ivshmem_sv[2], libvirt_ivshmem_sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_libvirt_sv) < 0)
+        goto fail_errno;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_ivshmem_sv) < 0)
+        goto fail_errno;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, libvirt_ivshmem_sv) < 0)
+        goto fail_errno;
+
+    pid_t libvirt, ivshmem;
+
+    // Spawn libvirt process
+    if ((libvirt = fork()) < 0) {
+        goto fail_errno;
+    } else if (libvirt == 0) {
+        // Get notified when parent exits
+        prctl(PR_SET_PDEATHSIG, SIGHUP);
+
+        // Close unused socketpair fds
+        close(main_libvirt_sv[0]);
+        close(libvirt_ivshmem_sv[1]);
+
+        run_libvirt_loop(main_libvirt_sv[1], libvirt_ivshmem_sv[0],
+                         LIBVIRT_HOST_URI);
+
+        // NOTREACHED
+        bail_out();
     }
 
-    struct thread_loop_data ivshmem_data = { &ivshmem_rb, IVSHMEM_SOCK_PATH };
-    if ((ret = pthread_create(&ivshmem_thread, NULL, &spawn_ivshmem_loop, &ivshmem_data))) {
-        log(LOGL_ERROR, "Failed to spawn libvirt thread: %s", strerror(ret));
-        return EXIT_FAILURE;
+    // Spawn ivshmem process
+    if ((ivshmem = fork()) < 0) {
+        goto fail_errno;
+    } else if (ivshmem == 0) {
+        // Get notified when parent exits
+        prctl(PR_SET_PDEATHSIG, SIGHUP);
+
+        // Close unused socketpair fds
+        close(main_ivshmem_sv[0]);
+        close(libvirt_ivshmem_sv[0]);
+
+        run_ivshmem_loop(main_ivshmem_sv[1], libvirt_ivshmem_sv[1],
+                         IVSHMEM_SOCK_PATH);
+
+        // NOTREACHED
+        bail_out();
     }
+
+    // Close unused fds
+    close(libvirt_ivshmem_sv[0]);
+    close(libvirt_ivshmem_sv[1]);
+    close(main_libvirt_sv[1]);
+    close(main_ivshmem_sv[1]);
 
     // Initialize epoll to wait for events from event loops
     int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        log(LOGL_ERROR, "Failed to initialize epoll: %m");
-        return EXIT_FAILURE;
-    }
+    if (epoll_fd < 0)
+        goto fail_errno;
 
-    if (add_epoll_fd(epoll_fd, libvirt_eventfd, EPOLLIN) < 0) {
-        log(LOGL_ERROR, "Failed to add libvirt eventfd to epoll: %m");
-        return EXIT_FAILURE;
-    }
-
-    if (add_epoll_fd(epoll_fd, ivshmem_eventfd, EPOLLIN) < 0) {
-        log(LOGL_ERROR, "Failed to add ivshmem eventfd to epoll: %m");
-        return EXIT_FAILURE;
-    }
-
+    if (add_epoll_fd(epoll_fd, main_libvirt_sv[0], EPOLLIN) < 0)
+        goto fail_errno;
+    if (add_epoll_fd(epoll_fd, main_ivshmem_sv[0], EPOLLIN) < 0)
+        goto fail_errno;
 
     // Main event loop
     struct epoll_event events[5];
@@ -237,16 +267,69 @@ int main(int argc, char **argv) {
     for(;;) {
         event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
         for(size_t i=0; i<event_count; i++) {
-            if (events[i].data.fd == libvirt_eventfd) {
-                ringbuf_clear_eventfd(&libvirt_rb);
+            if (events[i].data.fd == main_libvirt_sv[0]) {
 
-                log(LOGL_INFO, "TEST");
                 struct libvirt_event lv_event;
-                ringbuf_read(&libvirt_rb, &lv_event, sizeof(struct libvirt_event));
+                ssize_t n = read(main_libvirt_sv[0], &lv_event,
+                                 sizeof(struct libvirt_event));
+
+                if (n < 0) {
+                    log(LOGL_WARN, "Malformed message received from"
+                        " libvirt process! Bailing out.");
+                    bail_out();
+                }
 
                 log(LOGL_INFO, "Got event from libvirt! Type: %d", lv_event.type);
-
             }
         }
     }
+
+fail_errno:
+    log(LOGL_ERROR, "Daemon init failed: %m");
+    bail_out();
+}
+
+// Entry point for daemon when run in guest mode
+static void guest_main(void) {
+    // Create socketpairs for IPC
+    int main_vfio_sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_vfio_sv) < 0)
+        goto fail_errno;
+
+    // Spawn VFIO process
+    pid_t vfio;
+    if ((vfio = fork()) < 0) {
+        goto fail_errno;
+    } else if (vfio == 0) {
+        // Get notified when parent exits
+        prctl(PR_SET_PDEATHSIG, SIGHUP);
+
+        // Close unused socketpair fds
+        close(main_vfio_sv[0]);
+
+        run_vfio_loop(main_vfio_sv[1]);
+
+        // NOTREACHED
+        bail_out();
+    }
+
+    // Initialize epoll to wait for events from event loops
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        goto fail_errno;
+
+    if (add_epoll_fd(epoll_fd, main_vfio_sv[0], EPOLLIN) < 0)
+        goto fail_errno;
+
+    struct epoll_event events[5];
+    int event_count;
+    for(;;) {
+        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+        for(size_t i=0; i<event_count; i++) {
+        }
+    }
+
+fail_errno:
+    log(LOGL_ERROR, "Daemon init failed: %m");
+    bail_out();
 }

@@ -50,6 +50,74 @@ const char *ringbuf_ret_names[] = {
 static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
+/// Notification helpers
+static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size) {
+    int eventfd = priv->incoming_eventfd;
+
+    assert(eventfd > 0);
+    assert(priv->direction != RINGBUF_DIRECTION_WRITE);
+
+    for(;;) {
+        // If pub was provided, validate and flush data
+        if (pub) {
+            priv->pos_end = pub->pos_end_untrusted;
+            if (priv->pos_end > priv->size)
+                return RB_SEC_FAIL;
+        }
+
+        if (ringbuf_available(priv) >= size)
+            return RB_SUCCESS;
+
+        uint64_t buf;
+        ignore_value(read(eventfd, &buf, 8));
+    }
+}
+
+static void notify_read(ringbuf_t *priv) {
+    int eventfd = (priv->direction == RINGBUF_DIRECTION_LOCAL) ?
+                    priv->incoming_eventfd : priv->outgoing_eventfd;
+
+    assert(eventfd > 0);
+    assert(priv->direction != RINGBUF_DIRECTION_WRITE);
+
+    uint64_t buf = 1;
+    ignore_value(write(eventfd, &buf, 8));
+}
+
+static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size) {
+    int eventfd = priv->incoming_eventfd;
+
+    assert(eventfd > 0);
+    assert(priv->direction != RINGBUF_DIRECTION_READ);
+
+    for(;;) {
+        // If pub was provided, validate and flush data
+        if (pub) {
+            priv->pos_start = pub->pos_start_untrusted;
+            if (priv->pos_start > priv->size) {
+                return RB_SEC_FAIL;
+            }
+        }
+
+        if (ringbuf_free_space(priv) >= size)
+            return RB_SUCCESS;
+
+        uint64_t buf;
+        ignore_value(read(eventfd, &buf, 8));
+    }
+}
+
+static void notify_write(ringbuf_t *priv) {
+    int eventfd = (priv->direction == RINGBUF_DIRECTION_LOCAL) ?
+                    priv->incoming_eventfd : priv->outgoing_eventfd;
+
+    assert(eventfd > 0);
+    assert(priv->direction != RINGBUF_DIRECTION_READ);
+
+    uint64_t buf = 1;
+    ignore_value(write(eventfd, &buf, 8));
+}
+
 /// Security-related operations
 
 /**
@@ -64,15 +132,23 @@ static inline size_t ringbuf_free_space(ringbuf_t *rb);
  * Failure to do so will leave the buffer in an undefined state and compromise
  * all security guarantees.
  *
- * @param[out] priv  private structure to initialize
- * @param[out] pub   public (shared) structure to initialize
- * @param      start start address of ring buffer data region
- * @param      size  size of ring buffer data region
- * @param      flags ring buffer flags
+ * @param[out] priv      private structure to initialize
+ * @param[out] pub       public (shared) structure to initialize
+ * @param      start     start address of ring buffer data region
+ * @param      size      size of ring buffer data region
+ * @param      flags     ring buffer flags
+ * @param      direction direction of ring buffer (read or write)
+ * @param      in_efd    incoming eventfd
+ * @param      out_efd   outgoing eventfd
  * @return     ring buffer return code
  */
 ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start, size_t size,
-                 uint8_t flags) {
+                               uint8_t flags, uint8_t direction, int in_efd, int out_efd) {
+    // Validate flags
+    if ((flags & RINGBUF_FLAG_BLOCKING) && ((in_efd < 0) ||
+                                            (out_efd < 0)))
+        return RB_INVALID;
+
     // Initialize priv
     flags |= RINGBUF_FLAG_SEC_COPY;
     priv->flags = flags;
@@ -81,7 +157,9 @@ ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
     priv->start = start;
     priv->pos_start = 0;
     priv->pos_end = 0;
-    priv->eventfd = -1;
+    priv->direction = direction;
+    priv->incoming_eventfd = in_efd;
+    priv->outgoing_eventfd = out_efd;
 
     // Initialize pub
     pub->pos_start_untrusted = 0;
@@ -103,10 +181,14 @@ ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
  * @param      start      start address of the ringbuffer's data
  * @param      size       size of the ringbuffer
  * @param      flags_mask bitmask of allowed flags
+ * @param      direction  direction of ring buffer (read or write)
+ * @param      in_efd     incoming eventfd
+ * @param      out_efd    outgoing eventfd
  * @return     ring buffer return code
  */
 ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
-                                     size_t size, uint8_t flags_mask) {
+                                     size_t size, uint8_t flags_mask, uint8_t direction,
+                                     int in_efd, int out_efd) {
     // Validate the data in pub
     // Create a copy so an attacker can't modify it mid-validation
     ringbuf_pub_t pub_copy;
@@ -126,13 +208,20 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
     if (pub_copy.flags_untrusted & ~flags_mask)
         return RB_SEC_FAIL;
 
+    // Validate flags
+    if ((pub_copy.flags_untrusted & RINGBUF_FLAG_BLOCKING) && ((in_efd < 0) ||
+                                                               (out_efd < 0)))
+        return RB_INVALID;
+
     // Initialize the priv struct
     priv->flags = pub_copy.flags_untrusted;
     priv->size = size;
     priv->start = start;
     priv->pos_start = pub_copy.pos_start_untrusted;
     priv->pos_end = pub_copy.pos_end_untrusted;
-    priv->eventfd = -1;
+    priv->direction = direction;
+    priv->incoming_eventfd = in_efd;
+    priv->outgoing_eventfd = out_efd;
 
     return RB_SUCCESS;
 }
@@ -148,26 +237,20 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
  */
 ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data,
                                 size_t size) {
-    // Flush pos_start from public struct
-    priv->pos_start = pub->pos_start_untrusted;
-    if (priv->pos_start > priv->size) {
-        return RB_SEC_FAIL;
-    }
-
-    size_t free_space = ringbuf_free_space(priv);
-
-    // If blocking is enabled, busy wait for space
-    if (priv->flags & RINGBUF_FLAG_BLOCKING) {
-        while (free_space < size) {
-            // Flush pos_start and check free space
-            priv->pos_start = pub->pos_start_untrusted;
-            if (priv->pos_start > priv->size)
-                return RB_SEC_FAIL;
-
-            free_space = ringbuf_free_space(priv);
-
-            BUSYWAIT_YIELD_TO_OS();
+    if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
+        // Flush pos_start from public struct
+        priv->pos_start = pub->pos_start_untrusted;
+        if (priv->pos_start > priv->size) {
+            return RB_SEC_FAIL;
         }
+
+        size_t free_space = ringbuf_free_space(priv);
+        if (free_space < size)
+            return RB_NOSPACE;
+    } else {
+        ringbuf_ret_t rret;
+        if ((rret = block_write(priv, pub, size)) != RB_SUCCESS)
+            return rret;
     }
 
     // Perform the write
@@ -177,6 +260,10 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
 
     // Flush pos_end to the public struct
     pub->pos_end_untrusted = priv->pos_end;
+
+    // Notify
+    if (priv->flags & RINGBUF_FLAG_BLOCKING)
+        notify_write(priv);
 
     return RB_SUCCESS;
 }
@@ -191,27 +278,22 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
  * @return      ring buffer return code
  */
 ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size) {
-    // Flush pos_end from public struct
-    priv->pos_end = pub->pos_end_untrusted;
-    if (priv->pos_end > priv->size) {
-        return RB_SEC_FAIL;
-    }
-
-    size_t available = ringbuf_available(priv);
-
-    // If blocking is enabled, busy wait for data
-    if (priv->flags & RINGBUF_FLAG_BLOCKING) {
-        while(available < size) {
-            // Flush pos_end and check available
-            priv->pos_end = pub->pos_end_untrusted;
-            if (priv->pos_end > priv->size)
-                return RB_SEC_FAIL;
-
-            available = ringbuf_available(priv);
-
-            BUSYWAIT_YIELD_TO_OS();
+    if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
+        // Flush pos_end from public struct
+        priv->pos_end = pub->pos_end_untrusted;
+        if (priv->pos_end > priv->size) {
+            return RB_SEC_FAIL;
         }
+
+        size_t available = ringbuf_available(priv);
+        if (available < size)
+            return RB_NOSPACE;
+    } else {
+        ringbuf_ret_t rret;
+        if ((rret = block_read(priv, pub, size)) != RB_SUCCESS)
+            return rret;
     }
+
 
     // Perform the read
     ringbuf_ret_t ret = ringbuf_read(priv, buf, size);
@@ -219,6 +301,10 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
         return ret;
 
     pub->pos_start_untrusted = priv->pos_start;
+
+    // Notify
+    if (priv->flags & RINGBUF_FLAG_BLOCKING)
+        notify_read(priv);
 
     return RB_SUCCESS;
 }
@@ -242,14 +328,23 @@ static inline size_t ringbuf_available(ringbuf_t *rb) {
 
 /**
  * Initialize a new ringbuf.
- * @param rb ringbuffer structure to initialize
- * @param start start address of the data region to use
- * @param size  size of the data region to use
- * @param flags flags. See RINGBUF_FLAG_BLOCKING
+ * @param rb        ringbuffer structure to initialize
+ * @param start     start address of the data region to use
+ * @param size      size of the data region to use
+ * @param flags     flags. See RINGBUF_FLAG_BLOCKING
+ * @param direction direction of ring buffer (read or write)
+ * @param in_efd    incoming eventfd tied to another ringbuf's outgoing, or -1
+ * @param out_efd   outgoing eventfd tied to another ringbuf's incoming, or -1
  *
  * @return success?
  */
-ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags) {
+ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, uint8_t direction,
+                           int in_efd, int out_efd) {
+    // Validate flags
+    if ((flags & RINGBUF_FLAG_BLOCKING) && ((in_efd < 0) ||
+            (out_efd < 0 && direction != RINGBUF_DIRECTION_LOCAL)))
+        return RB_INVALID;
+
     rb->flags = flags;
     rb->offset = (flags & RINGBUF_FLAG_RELATIVE) ? (uint8_t *)start - (uint8_t *)rb : 0;
     rb->size = size;
@@ -257,25 +352,24 @@ ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flag
 
     rb->pos_start = 0;
     rb->pos_end = 0;
-    rb->eventfd = -1;
+
+    rb->direction = direction;
+    rb->incoming_eventfd = in_efd;
+    rb->outgoing_eventfd = out_efd;
 
     return RB_SUCCESS;
 }
 
 ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
+    if (size > USABLE(rb))
+        return RB_NOSPACE;
+
     // If this rb is blocking (and isn't a sec copy), wait for space to become available.
     // Sec copies handle blocking in their respective wrapper functions.
-    if (!(rb->flags & RINGBUF_FLAG_SEC_COPY) && rb->flags & RINGBUF_FLAG_BLOCKING) {
-        while (ringbuf_free_space(rb) < size)
-            BUSYWAIT_YIELD_TO_OS();
+    if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY)) {
+        block_write(rb, NULL, size);
     } else if (ringbuf_free_space(rb) < size) {
         return RB_NOSPACE;
-    }
-
-    // If local eventfd is enabled, notify it
-    if ((rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD) && rb->eventfd > 0) {
-        uint64_t buf = 1;
-        ignore_value(write(rb->eventfd, &buf, 8));
     }
 
     void *real_start = (rb->flags & RINGBUF_FLAG_RELATIVE) ? ((uint8_t *)rb + rb->offset) : rb->start;
@@ -288,30 +382,38 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
         memcpy(real_start + rb->pos_end, data, first);
         rb->pos_end += first;
 
-        if (first_left >= size) {
-            return RB_SUCCESS;
-        }
+        if (first_left >= size)
+            goto out;
 
         size_t second = size - first_left;
         memcpy(real_start, (uint8_t *)data + first, second);
         rb->pos_end = second;
-        return RB_SUCCESS;
+
+        goto out;
     } else {
         // Write from [pos_end, pos_start)
         size_t first_left = rb->pos_start - rb->pos_end;
         assert(size <= first_left);
         memcpy(real_start + rb->pos_end, data, size);
         rb->pos_end += size;
-        return RB_SUCCESS;
+
+        goto out;
     }
+out:
+    if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY))
+        notify_write(rb);
+
+    return RB_SUCCESS;
 }
 
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
+    if (size > USABLE(rb))
+        return RB_NOSPACE;
+
     // If this rb is blocking (and isn't a sec copy), wait for data.
     // Sec copies handle blocking in their respective wrapper functions.
-    if (!(rb->flags & RINGBUF_FLAG_SEC_COPY) && rb->flags & RINGBUF_FLAG_BLOCKING) {
-        while (ringbuf_available(rb) < size)
-            BUSYWAIT_YIELD_TO_OS();
+    if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY)) {
+        block_read(rb, NULL, size);
     } else if (ringbuf_available(rb) - ringbuf_free_space(rb) < size) {
         return RB_NODATA;
     }
@@ -324,7 +426,7 @@ ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
         assert(avail >= size);
         memcpy(out, real_start + rb->pos_start, size);
         rb->pos_start += size;
-        return RB_SUCCESS;
+        goto out;
     } else {
         // Read from [pos_start, end) and if required,
         // read the rest from [start, pos_end)
@@ -334,52 +436,18 @@ ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
         rb->pos_start += size;
 
         if (first_avail >= size)
-            return RB_SUCCESS;
+            goto out;
 
         size_t second = size - first_avail;
         memcpy((uint8_t *)out + first, real_start, second);
         rb->pos_start = second;
-        return RB_SUCCESS;
-    }
-}
-
-struct eventfd_thread_data {
-    ringbuf_t *rb;
-    ringbuf_pub_t *pub;
-};
-
-static void *_eventfd_thread_handler(void *_data) {
-    struct eventfd_thread_data *data = _data;
-
-    // Busywait for bytes and notify eventfd
-    if (!data->pub) {
-        // No pub, just poll on the rb
-        while (!data->rb->kill_thread && !ringbuf_available(data->rb))
-            BUSYWAIT_YIELD_TO_OS();
-    } else {
-        // pub available, flush pos_end on each loop (and bounds check it)
-        size_t available;
-        do {
-            data->rb->pos_end = data->pub->pos_end_untrusted;
-            if (data->rb->pos_end > data->rb->size)
-                goto out;
-
-            available = ringbuf_available(data->rb);
-
-            BUSYWAIT_YIELD_TO_OS();
-        } while (!data->rb->kill_thread && !available);
-    }
-
-    if (data->rb->kill_thread)
         goto out;
-
-    // Set the eventfd
-    uint64_t buf = 1;
-    ignore_value(write(data->rb->eventfd, &buf, sizeof(uint64_t)));
-
+    }
 out:
-    free(data);
-    return NULL;
+    if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY))
+        notify_read(rb);
+
+    return RB_SUCCESS;
 }
 
 /**
@@ -392,53 +460,22 @@ out:
  * @return file descriptor for eventfd, or -1 on failure
  */
 int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
-    // Create eventfd if it doesn't exist
-    if (rb->eventfd < 0) {
-        rb->eventfd = eventfd(0, 0);
-        if (rb->eventfd < 0) {
-            return -1;
-        }
+    if (rb->incoming_eventfd > 0 && rb->direction != RINGBUF_DIRECTION_WRITE) {
+        return rb->incoming_eventfd;
     }
 
-    // If data is already available, take a shortcut and just notify
-    if (ringbuf_available(rb)) {
-        uint64_t buf = 1;
-        ignore_value(write(rb->eventfd, &buf, sizeof(buf)));
-        return rb->eventfd;
-    }
-
-    // If we're using a local eventfd, just return it
-    if (rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD)
-        return rb->eventfd;
-
-    // Allocate data to pass to thread
-    struct eventfd_thread_data *data = malloc(sizeof(struct eventfd_thread_data));
-    if (!data)
-        return -1;
-    data->rb = rb;
-    data->pub = pub;
-
-    rb->kill_thread = false;
-    int ret = pthread_create(&rb->eventfd_thread, NULL, _eventfd_thread_handler, data);
-    if (ret) {
-        free(data);
-        return -1;
-    }
-
-    return rb->eventfd;
+    // Can't read from this rb
+    return -1;
 }
 
 void ringbuf_clear_eventfd(ringbuf_t *rb) {
-    if (!(rb->flags & RINGBUF_FLAG_LOCAL_EVENTFD)) {
-        // Kill thread if it's still running
-        rb->kill_thread = true;
-        pthread_join(rb->eventfd_thread, NULL);
-    }
-
+    // sponge
     // Temporarily disable blocking and reset the eventfd's counter
+    /*
     uint64_t buf;
     int fd_flags = fcntl(rb->eventfd, F_GETFL, 0);
     fcntl(rb->eventfd, F_SETFL, fd_flags | O_NONBLOCK);
     ignore_value(read(rb->eventfd, &buf, sizeof(uint64_t)));
     fcntl(rb->eventfd, F_SETFL, fd_flags);
+    */
 }

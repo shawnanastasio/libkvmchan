@@ -22,6 +22,6 @@
 
 #include "ringbuf.h"
 
-int run_ivshmem_loop(ringbuf_t *rb, const char *sock_path);
+void run_ivshmem_loop(int mainsoc, int libvirtsoc, const char *sock_path);
 
 #endif // KVMCHAND_IVSHMEM_H

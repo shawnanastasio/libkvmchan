@@ -3,13 +3,13 @@ DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
 LIBS=-lrt -pthread
 
-DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c
+DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c
 DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
 DAEMON_BIN:=kvmchand
 DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)
 DAEMON_CFLAGS:=$(shell pkg-config --cflags libxml-2.0)
 
-TEST_SRCS:=test.o
+TEST_SRCS:=test.c
 TEST_DEPS:=$(TEST_SRCS:.c=.o)
 TEST_BIN:=test
 TEST_LIBS:=$(shell pkg-config --cflags --libs check)

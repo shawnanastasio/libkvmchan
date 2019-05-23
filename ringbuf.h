@@ -43,6 +43,7 @@ typedef enum ringbuf_ret {
     RB_NODATA,    // No data in ringbuffer to read
     RB_OOM,       // Out of memory (malloc failed)
     RB_SEC_FAIL,  // Security verification failed
+    RB_INVALID,   // Invalid configuration/options specified
 } ringbuf_ret_t;
 
 /**
@@ -63,10 +64,24 @@ typedef struct ringbuf {
     size_t pos_start; // inc
     size_t pos_end; // exc
 
-    // eventfd data storage
-    int eventfd;
-    pthread_t eventfd_thread;
-    bool kill_thread;
+    uint8_t direction;
+#define RINGBUF_DIRECTION_READ  0
+#define RINGBUF_DIRECTION_WRITE 1
+#define RINGBUF_DIRECTION_LOCAL 2
+
+    /**
+     * DIRECTION_READ:
+     *  - incoming is unblocked when ready to read
+     *  - outgoing is written to after reading
+     * DIRECTION_WRITE:
+     *  - incoming is unblocked when other side reads data
+     *  - outgoing is written to after writing
+     * DIRECTION_LOCAL (mostly just for unit tests):
+     *  - incoming is used for all notifications
+     *  - outgoing is ignored
+     */
+    int incoming_eventfd;
+    int outgoing_eventfd;
 } ringbuf_t;
 
 typedef struct ringbuf_pub {
@@ -90,14 +105,16 @@ typedef struct ringbuf_pub {
 
 // Security functions
 ringbuf_ret_t ringbuf_sec_init(ringbuf_t *priv, ringbuf_pub_t *pub, void *start, size_t size,
-                 uint8_t flags);
+                               uint8_t flags, uint8_t direction, int in_efd, int out_efd);
 ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *start,
-                                  size_t size, uint8_t flags_mask);
+                                     size_t size, uint8_t flags_mask, uint8_t direction,
+                                     int in_efd, int out_efd);
 ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size);
 ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size);
 
 // Ringbuf I/O functions
-ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags);
+ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, uint8_t direction,
+                           int in_efd, int out_efd);
 ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
 int  ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub);

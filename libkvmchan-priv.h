@@ -26,11 +26,22 @@
 
 /* client<->kvmchand API */
 
+#define KVMCHAND_API_VERSION 1
+
 /**
  * A message sent from a client (API consumer) to kvmchand.
  */
 struct kvmchand_message {
-    uint8_t command;
+    uint64_t command;
+
+    /**
+     * Confirm client<->kvmchand communication works.
+     * arg0 (u64) - API version number supported by client
+     *
+     * ret  (i64) - API version number supported by host
+     */
+#define KVMCHAND_CMD_HELLO      0
+
     /**
      * Create a new vchan.
      * arg0 (int) - domain # of client
@@ -40,7 +51,7 @@ struct kvmchand_message {
      *
      * ret (i64) - -1 on fail, else index of ivshmem device for new vchan
      */
-#define KVMCHAND_CMD_SERVERINIT 0
+#define KVMCHAND_CMD_SERVERINIT 1
 
     /**
      * Connect to an existing vchan.
@@ -49,7 +60,7 @@ struct kvmchand_message {
      *
      * ret (i64) - -1 on fail, else index of ivshmem device for vchan
      */
-#define KVMCHAND_CMD_CLIENTINIT 1
+#define KVMCHAND_CMD_CLIENTINIT 2
 
     uint64_t args[4];
 };
@@ -58,7 +69,7 @@ struct kvmchand_message {
  * A response sent from kvmchand to a client
  */
 struct kvmchand_ret {
-    uint64_t ret;
+    int64_t ret;
 };
 
 /**
@@ -80,6 +91,12 @@ typedef struct shmem_hdr {
 /* Offsets of rbs in shm region between client and kvmchand */
 #define DAEMON_H2C_OFFSET (sizeof(shmem_hdr_t))
 #define DAEMON_C2H_OFFSET (DAEMON_H2C_OFFSET + DAEMON_RING_SIZE)
+
+/* IVPosition for ivshmem device used for guest<->host kvmchand communication */
+#define KVMCHAND_IVPOSITION 1
+
+/* Number of eventfds for each direction */
+#define NUM_EVENTFDS 2
 
 /* Macros */
 

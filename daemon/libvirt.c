@@ -36,6 +36,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/epoll.h>
 
 #include <libvirt/libvirt.h>
 #include <libvirt/libvirt-qemu.h>
@@ -44,8 +45,10 @@
 #include <libxml/tree.h>
 #include <libxml/xpath.h>
 
+#include "config.h"
 #include "util.h"
 #include "libvirt.h"
+#include "libkvmchan-priv.h"
 
 struct domain_info {
     char uuid_str[VIR_UUID_STRING_BUFLEN];
@@ -59,10 +62,10 @@ static sem_t running_domains_sem;
 // libvirt connection
 static virConnectPtr conn;
 
-// Ring buffer for sending events to main thread
-static ringbuf_t *main_rb;
+// IPC socket fds
+static int main_soc, ivshmem_soc;
 
-bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
+static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     bool ret = false;
     sem_wait(&running_domains_sem);
 
@@ -161,6 +164,15 @@ out:
  * @return success?
  */
 static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index) {
+    char *result;
+
+#ifdef USE_VFIO_NOIOMMU
+    /**
+     * NOIOMMU is easy, since we don't have to worry about IOMMU groups
+     * we can just add the ivshmem devices anywhere without worrying
+     * about dedicated pci host bridges.
+     */
+
     // A QMP command to add a new chardev with formats %d %s (index, path)
     const char qmp_new_chardev_format[] = "{\"execute\":\"chardev-add\", \"arguments\": {\"id\":"
         "\"charshmem%d\", \"backend\":{ \"type\": \"socket\", \"data\": "
@@ -168,14 +180,55 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
 
     // A QMP command to add a new ivshmem device with format %d (index)
     const char qmp_new_ivshmem_format[] = "{\"execute\":\"device_add\", \"arguments\": {\"driver\": "
-        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 1}}";
+        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 2}}";
+ //       "\"bus\": \"pci.1.0\"}}";
 
-    char buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
-    char *result;
+    // Fill in arguments for chardev and ivshmem commands
+    char chardev_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
+    char ivshmem_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for pci bus? */];
+    snprintf(chardev_buf, sizeof(chardev_buf), qmp_new_chardev_format, index, path);
+    snprintf(ivshmem_buf, sizeof(ivshmem_buf), qmp_new_ivshmem_format, index);
+
+#elif defined(USE_VFIO_SPAPR)
+    /**
+     * With the SPAPR IOMMU mode, we have to ensure that all ivshmem devices
+     * are on a separate spapr-pci-host-bridge. For now, assume that the user
+     * has created a dedicated spapr-pci-host-bridge at index 1. In the future
+     * this needs to be replaced with proper parsing of the domain XML to
+     * determine the correct host bridge to use.
+     *
+     * For reference, adding a host bridge at index 1 can be done with the
+     * following XML:
+     *
+     * <controller type='pci' index='1' model='pci-root'>
+     *   <model name='spapr-pci-host-bridge'/>
+     *   <target index='1'/>
+     * </controller>
+     */
+
+    // A QMP command to add a new chardev with formats %d %s (index, path)
+    const char qmp_new_chardev_format[] = "{\"execute\":\"chardev-add\", \"arguments\": {\"id\":"
+        "\"charshmem%d\", \"backend\":{ \"type\": \"socket\", \"data\": "
+        "{\"server\": false, \"addr\": {\"type\": \"unix\", \"data\": {\"path\": \"%s\"} } } } } }";
+
+    // A QMP command to add a new ivshmem device with format %d %s (index, pci bus ID)
+    const char qmp_new_ivshmem_format[] = "{\"execute\":\"device_add\", \"arguments\": {\"driver\": "
+        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 2,"
+        "\"bus\": \"%2$s\"}}";
+
+    // Fill in arguments for chardev and ivshmem commands
+    char chardev_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
+    char ivshmem_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for pci bus? */];
+    snprintf(chardev_buf, sizeof(chardev_buf), qmp_new_chardev_format, index, path);
+    snprintf(ivshmem_buf, sizeof(ivshmem_buf), qmp_new_ivshmem_format, index,
+             "pci.1.0" /* TODO: dynamically detect PCI host bridge to use via XML */);
+
+#else
+#error "Unimplemented IOMMU mode!"
+#endif
 
     // Create new chardev
-    snprintf(buf, sizeof(buf), qmp_new_chardev_format, index, path);
-    if (virDomainQemuMonitorCommand(dom, buf, &result, 0) < 0) {
+    if (virDomainQemuMonitorCommand(dom, chardev_buf, &result, 0) < 0) {
         log(LOGL_ERROR, "Failed to attach chardev to dom: %s", result);
         free(result);
         return false;
@@ -188,8 +241,7 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
     free(result);
 
     // Create new ivshmem device
-    snprintf(buf, sizeof(buf), qmp_new_ivshmem_format, index);
-    if (virDomainQemuMonitorCommand(dom, buf, &result, 0) < 0) {
+    if (virDomainQemuMonitorCommand(dom, ivshmem_buf, &result, 0) < 0) {
         log(LOGL_ERROR, "Failed to attach ivshmem device to dom: %s", result);
         free(result);
         return false;
@@ -202,6 +254,7 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
     free(result);
 
     return true;
+
 }
 
 #if 0
@@ -257,10 +310,6 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
     switch(event) {
         case VIR_DOMAIN_EVENT_STARTED:
             ;
-            // Send a message to main thread
-            struct libvirt_event event = { 1 };
-            ringbuf_write(main_rb, &event, sizeof(struct libvirt_event));
-
             // Add this domain to running_domains
             struct domain_info *info = malloc_w(sizeof(struct domain_info));
             if (virDomainGetUUIDString(dom, info->uuid_str) < 0) {
@@ -289,6 +338,12 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             vec_voidp_push_back(&running_domains, info);
             sem_post(&running_domains_sem);
 
+            // Inform main loop of the new VM
+            struct libvirt_event ev = { .type = LVE_TYPE_STARTED };
+            if (write(main_soc, &ev, sizeof(ev)) < 0) {
+                log(LOGL_WARN, "Failed to send event to main process!");
+                bail_out();
+            }
 
             break;
         case VIR_DOMAIN_EVENT_STOPPED:
@@ -342,36 +397,68 @@ static void connect_close_callback(virConnectPtr conn, int reason,
     log(LOGL_ERROR, "Connection closed due to unknown reason");
 }
 
-static void free_destructor(void *element) {
-    free(element);
+static void *loop_message_handler(void *unused) {
+    ignore_value(unused);
+
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        goto fail_errno;
+    if (add_epoll_fd(epoll_fd, main_soc, EPOLLIN) < 0)
+        goto fail_errno;
+    if (add_epoll_fd(epoll_fd, ivshmem_soc, EPOLLIN) < 0)
+        goto fail_errno;
+
+
+    struct epoll_event events[5];
+    int event_count;
+    for(;;) {
+        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+        for(int i=0; i<event_count; i++) {
+            // TODO: implement me
+            //log(LOGL_INFO, "Got message from other loop!");
+        }
+    }
+
+fail_errno:
+    ;
+    int *errno_h = malloc_w(sizeof(int));
+    *errno_h = errno;
+    return errno_h;
+
 }
 
-int run_libvirt_loop(ringbuf_t *rb, const char *host_uri) {
-    main_rb = rb;
+void run_libvirt_loop(int mainsoc, int ivshmemsoc, const char *host_uri) {
+    main_soc = mainsoc;
+    ivshmem_soc = ivshmemsoc;
+
+    // Spawn loop message handler
+    pthread_t handler;
+    if (pthread_create(&handler, NULL, loop_message_handler, NULL))
+        goto error;
 
     // Initialize libvirt API
     if (virInitialize() < 0) {
         log(LOGL_ERROR, "Failed to initialize libvirt");
-        return -1;
+        goto error;
     }
 
     if (virEventRegisterDefaultImpl() < 0) {
         log(LOGL_ERROR, "Failed to register event implementation: %s",
                 virGetLastErrorMessage());
-        return -1;
+        goto error;
     }
 
     // Try to establish a connection to libvirtd
     conn = virConnectOpen(host_uri);
     if (!conn) {
         log(LOGL_ERROR, "Failed to establish a connection to libvirt!");
-        return -1;
+        goto error;
     }
 
     if (virConnectRegisterCloseCallback(conn, connect_close_callback, NULL,
                                         NULL) < 0) {
         log(LOGL_ERROR, "Unable to register close callback");
-        return -1;
+        goto error;
     }
 
     // Register callback for VM lifecycle changes
@@ -382,26 +469,26 @@ int run_libvirt_loop(ringbuf_t *rb, const char *host_uri) {
 
     if (event_id < 0) {
         log(LOGL_ERROR, "Failed to install libvirt callback!");
-        return -1;
+        goto error;
     }
 
     // Establish initial list of running domains
     int n_domains = virConnectNumOfDomains(conn);
     if (!vec_voidp_init(&running_domains, n_domains, free_destructor)) {
         log(LOGL_ERROR, "Failed to allocate memory!");
-        return -1;
+        goto error;
     }
 
     if (sem_init(&running_domains_sem, 0, 1) < 0) {
         log(LOGL_ERROR, "Failed to init semaphore: %m");
-        return -1;
+        goto error;
     }
 
     if (n_domains > 0) {
         int *domains = calloc(n_domains, sizeof(int));
         if (!domains) {
             log(LOGL_ERROR, "Failed to allocate memory: %s!", strerror(errno));
-            return -1;
+            goto error;
         }
 
         n_domains = virConnectListDomains(conn, domains, n_domains);
@@ -411,27 +498,28 @@ int run_libvirt_loop(ringbuf_t *rb, const char *host_uri) {
             if (!p) {
                 log(LOGL_ERROR, "Failed to lookup domain!");
                 free(domains);
-                return -1;
+                goto error;
             }
 
             struct domain_info *info = malloc_w(sizeof(struct domain_info));
             if (virDomainGetUUIDString(p, info->uuid_str)) {
                 log(LOGL_ERROR, "Failed to lookup domain UUID!");
                 free(domains);
-                return -1;
+                goto error;
             }
 
             if (!find_qemu_process_pid(info->uuid_str, &info->pid)) {
                 log(LOGL_WARN, "Failed to lookup domain PID!");
                 free(domains);
-                return -1;
+                goto error;
             }
 
             // Create a new ivshmem device on the guest
             // that will be used for guest<->kvmchand communication
             if (!attach_ivshmem_device(p, IVSHMEM_SOCK_PATH, 0)) {
                 log(LOGL_WARN, "Failed to attach ivshmem device!");
-                return -1;
+                free(domains);
+                goto error;
             }
 
             assert(vec_voidp_push_back(&running_domains, info));
@@ -448,6 +536,7 @@ int run_libvirt_loop(ringbuf_t *rb, const char *host_uri) {
         }
     }
 
-    /*NOTREACHED*/
-    return -1;
+error:
+    log(LOGL_ERROR, "Libvirt loop encountered fatal error: %m!");
+    bail_out();
 }
