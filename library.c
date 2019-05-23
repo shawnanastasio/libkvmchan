@@ -30,19 +30,10 @@
 #include <sys/stat.h>
 
 #include "libkvmchan.h"
+#include "libkvmchan-priv.h"
 #include "ringbuf.h"
 
 #define ARRAY_SIZE(x) (sizeof((x))/ sizeof(*(x)))
-
-// A private data structure present at the beginning of all libkvmchan
-// shared memory objects.
-#define SHMEM_MAGIC 0xDEADBEEFCAFEBABA
-typedef struct shmem_hdr {
-    uint64_t magic;
-    ringbuf_pub_t host_to_client_pub;
-    ringbuf_pub_t client_to_host_pub;
-} shmem_hdr_t;
-
 
 // Main struct. Users only get opaque pointers.
 typedef struct libkvmchan {
@@ -172,6 +163,7 @@ fail:
  * @return A libkvmchan_t struct, or NULL on error
  */
 libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle) {
+#if 0
     // Allocate a libkvmchan_t structure
     libkvmchan_t *chan = malloc(sizeof(libkvmchan_t));
     if (!chan)
@@ -218,6 +210,7 @@ fail_malloc:
     free(chan);
 fail:
     return NULL;
+#endif
 }
 
 
@@ -233,6 +226,7 @@ fail:
  * @return A libkvmchan_t struct, or NULL on error
  */
 libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
+#if 0
     ringbuf_ret_t rret;
 
     // Allocate libkvmchan_t struct
@@ -248,6 +242,7 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
     shmem_hdr_t *hdr = ret->shm;
     if (hdr->magic != SHMEM_MAGIC) {
         errno = EINVAL;
+        free(ret);
         return NULL;
     }
 
@@ -274,6 +269,7 @@ libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle) {
 
     return ret;
 fail:
+    free(ret);
     if (rret == RB_OOM)
         errno = ENOMEM;
     else if (rret == RB_SEC_FAIL)
@@ -282,6 +278,7 @@ fail:
         errno = EINVAL;
 
     return NULL;
+#endif
 }
 
 /**
