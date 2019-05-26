@@ -545,6 +545,10 @@ static void *outgoing_thread(void *conn_) {
         for (int i=0; i<event_count; i++) {
             int cur_fd = events[i].data.fd;
 
+            // Flush event
+            uint64_t buf;
+            ignore_value(read(cur_fd, &buf, 8));
+
             // Exit if event is from the kill eventfd
             if (cur_fd == conn->outgoing_thread_kill)
                 goto fail_epoll_create;;
@@ -636,7 +640,8 @@ static bool vfio_conn_get_eventfds(struct vfio_connection *conn) {
     irqset->index = VFIO_PCI_MSIX_IRQ_INDEX;
     irqset->start = 0;
     irqset->count = NUM_EVENTFDS;
-    memcpy(irqset->data, conn->incoming_eventfds, sizeof(int) * NUM_EVENTFDS);
+    for (size_t i=0; i<NUM_EVENTFDS; i++)
+        ((int *)irqset->data)[i] = conn->incoming_eventfds[i];
 
     if (ioctl(conn->device_fd, VFIO_DEVICE_SET_IRQS, irqset_buf) < 0)
         goto fail_incoming_eventfd;
@@ -732,7 +737,6 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
         .index = VFIO_PCI_BAR2_REGION_INDEX
     };
     if (ioctl(fd, VFIO_DEVICE_GET_REGION_INFO, &region) < 0) {
-        log(LOGL_ERROR, "nope1");
         goto fail_mmap_bar0;
     }
 
@@ -740,7 +744,6 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
     shared = mmap(NULL, shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
                   vfio_region_mmap_offset(VFIO_PCI_BAR2_REGION_INDEX));
     if (shared == (void *)-1) {
-        log(LOGL_ERROR, "nope2");
         goto fail_mmap_bar0;
     }
 
@@ -794,6 +797,7 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
         goto fail_get_eventfds;
     }
 
+    log(LOGL_INFO, "Successfully connected to host daemon.");
     return true;
 
 fail_get_eventfds:

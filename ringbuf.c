@@ -28,13 +28,8 @@
 
 #include "ringbuf.h"
 #include "libkvmchan-priv.h"
-
 #define MAX(x, y) ((x > y) ? (x) : (y))
 #define MIN(x, y) ((x > y) ? (y) : (x))
-
-// A way to temporarily yield to the OS while waiting for a blocking operation
-// TODO: is this optimal performance-wise?
-#define BUSYWAIT_YIELD_TO_OS() usleep(1)
 
 // The usable space (size of ringbuf - 1)
 #define USABLE(rb) ((rb)->size - 1)
@@ -51,6 +46,14 @@ static inline size_t ringbuf_available(ringbuf_t *rb);
 static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
 /// Notification helpers
+
+static void block_on_eventfd(int eventfd) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(eventfd, &rfds);
+    ignore_value(select(eventfd + 1, &rfds, NULL, NULL, NULL));
+}
+
 static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size) {
     int eventfd = priv->incoming_eventfd;
 
@@ -69,6 +72,7 @@ static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size
             return RB_SUCCESS;
 
         uint64_t buf;
+        block_on_eventfd(eventfd);
         ignore_value(read(eventfd, &buf, 8));
     }
 }
@@ -103,6 +107,7 @@ static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t siz
             return RB_SUCCESS;
 
         uint64_t buf;
+        block_on_eventfd(eventfd);
         ignore_value(read(eventfd, &buf, 8));
     }
 }
