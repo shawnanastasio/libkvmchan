@@ -199,12 +199,10 @@ static void host_main(void) {
     // security sandboxing and increases isolation.
 
     // Create socketpairs for IPC
-    int main_libvirt_sv[2], main_ivshmem_sv[2], libvirt_ivshmem_sv[2];
+    int main_libvirt_sv[2], main_ivshmem_sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_libvirt_sv) < 0)
         goto fail_errno;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_ivshmem_sv) < 0)
-        goto fail_errno;
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, libvirt_ivshmem_sv) < 0)
         goto fail_errno;
 
     pid_t libvirt, ivshmem;
@@ -218,10 +216,8 @@ static void host_main(void) {
 
         // Close unused socketpair fds
         close(main_libvirt_sv[0]);
-        close(libvirt_ivshmem_sv[1]);
 
-        run_libvirt_loop(main_libvirt_sv[1], libvirt_ivshmem_sv[0],
-                         LIBVIRT_HOST_URI);
+        run_libvirt_loop(main_libvirt_sv[1], LIBVIRT_HOST_URI);
 
         // NOTREACHED
         bail_out();
@@ -236,18 +232,14 @@ static void host_main(void) {
 
         // Close unused socketpair fds
         close(main_ivshmem_sv[0]);
-        close(libvirt_ivshmem_sv[0]);
 
-        run_ivshmem_loop(main_ivshmem_sv[1], libvirt_ivshmem_sv[1],
-                         IVSHMEM_SOCK_PATH);
+        run_ivshmem_loop(main_ivshmem_sv[1], IVSHMEM_SOCK_PATH);
 
         // NOTREACHED
         bail_out();
     }
 
     // Close unused fds
-    close(libvirt_ivshmem_sv[0]);
-    close(libvirt_ivshmem_sv[1]);
     close(main_libvirt_sv[1]);
     close(main_ivshmem_sv[1]);
 

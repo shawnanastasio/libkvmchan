@@ -63,7 +63,7 @@ static sem_t running_domains_sem;
 static virConnectPtr conn;
 
 // IPC socket fds
-static int main_soc, ivshmem_soc;
+static int main_soc;
 
 static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     bool ret = false;
@@ -181,7 +181,6 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
     // A QMP command to add a new ivshmem device with format %d (index)
     const char qmp_new_ivshmem_format[] = "{\"execute\":\"device_add\", \"arguments\": {\"driver\": "
         "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 2}}";
- //       "\"bus\": \"pci.1.0\"}}";
 
     // Fill in arguments for chardev and ivshmem commands
     char chardev_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
@@ -405,9 +404,6 @@ static void *loop_message_handler(void *unused) {
         goto fail_errno;
     if (add_epoll_fd(epoll_fd, main_soc, EPOLLIN) < 0)
         goto fail_errno;
-    if (add_epoll_fd(epoll_fd, ivshmem_soc, EPOLLIN) < 0)
-        goto fail_errno;
-
 
     struct epoll_event events[5];
     int event_count;
@@ -427,9 +423,8 @@ fail_errno:
 
 }
 
-void run_libvirt_loop(int mainsoc, int ivshmemsoc, const char *host_uri) {
+void run_libvirt_loop(int mainsoc, const char *host_uri) {
     main_soc = mainsoc;
-    ivshmem_soc = ivshmemsoc;
 
     // Spawn loop message handler
     pthread_t handler;

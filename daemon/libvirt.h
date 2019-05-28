@@ -24,7 +24,7 @@
 
 #include "ringbuf.h"
 
-void run_libvirt_loop(int mainsoc, int ivshmemsoc, const char *host_uri);
+void run_libvirt_loop(int mainsoc, const char *host_uri);
 //bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out);
 
 // Structs used for Main<->Libvirt event loop communication

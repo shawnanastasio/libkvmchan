@@ -444,7 +444,7 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
     return true;
 }
 
-void run_ivshmem_loop(int mainsoc, int libvirtsoc, const char *sock_path) {
+void run_ivshmem_loop(int mainsoc, const char *sock_path) {
     // Set up the socket and bind it to the given path
     int socfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socfd < 0)
@@ -475,8 +475,6 @@ void run_ivshmem_loop(int mainsoc, int libvirtsoc, const char *sock_path) {
         goto error;
     if (add_epoll_fd(epoll_fd, mainsoc, EPOLLIN) < 0)
         goto error;
-    if (add_epoll_fd(epoll_fd, libvirtsoc, EPOLLIN) < 0)
-        goto error;
 
     // Initialize ivshmem_server
     struct ivshmem_server server = { .socfd = socfd };
@@ -504,12 +502,6 @@ void run_ivshmem_loop(int mainsoc, int libvirtsoc, const char *sock_path) {
                     log(LOGL_WARN, "Couldn't add fd to epoll set: %m");
                     goto error;
                 }
-            } else if (events[i].data.fd == mainsoc || events[i].data.fd == libvirtsoc) {
-                int fd = events[i].data.fd;
-                bool ret = handle_loop_message(events[i].data.fd, fd == mainsoc ? LOOP_MSG_MAIN :
-                                                        LOOP_MSG_LIBVIRT);
-                if (!ret)
-                    goto error;
             } else {
                 // Event from a client fd, check if it was closed
                 int fd = events[i].data.fd;
