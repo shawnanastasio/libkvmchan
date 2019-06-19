@@ -36,6 +36,9 @@
 struct dispatcher_data {
     int socfd;
 
+    // Incremented for each new message
+    uint32_t id_counter;
+
     // Request queue of ipc_messages to send
     struct vec_voidp requests;
     pthread_cond_t requests_cond;
@@ -67,9 +70,6 @@ struct response {
 // Global IPC data for this process
 
 struct ipc_data {
-    // Incremented for each new message
-    uint32_t id_counter;
-
     struct dispatcher_data dispatcher_data;
     struct receiver_data receiver_data;
     pthread_t dispatcher_thread;
@@ -85,6 +85,7 @@ static void response_destructor(void *resp_) {
 
 static bool dispatcher_data_init(struct dispatcher_data *data, int socfd) {
     data->socfd = socfd;
+    data->id_counter = 0;
 
     if (!vec_voidp_init(&data->requests, 10, free_destructor))
         return false;
@@ -122,9 +123,14 @@ static bool receiver_data_init(struct receiver_data *data, int socfd,
     return true;
 }
 
-static bool push_request(struct dispatcher_data *data, struct ipc_message *msg) {
+static bool push_request(struct dispatcher_data *data, struct ipc_message *msg,
+                         uint32_t *id_out) {
     bool res = false;
     ASSERT(!pthread_mutex_lock(&data->requests_mutex));
+
+    // Update special fields (id, remote)
+    msg->id = data->id_counter++;
+    *id_out = msg->id;
 
     if (!vec_voidp_push_back(&data->requests, msg))
         goto out;
@@ -384,8 +390,6 @@ bool ipc_server_send_message(int socfd, struct ipc_message *msg) {
  * @return       success?
  */
 bool ipc_start(int socfd, void (*message_handler)(struct ipc_message *)) {
-    g_ipc_data.id_counter = 0;
-
     if (!dispatcher_data_init(&g_ipc_data.dispatcher_data, socfd))
         goto fail;
 
@@ -424,10 +428,8 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
     struct ipc_message *msg_h = malloc_w(sizeof(struct ipc_message));
     memcpy(msg_h, msg, sizeof(struct ipc_message));
 
-    // Write an id
-    msg_h->id = g_ipc_data.id_counter++;
-
-    if (!push_request(&g_ipc_data.dispatcher_data, msg_h)) {
+    uint32_t id;
+    if (!push_request(&g_ipc_data.dispatcher_data, msg_h, &id)) {
         free(msg_h);
         return false;
     }
@@ -437,7 +439,7 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
         return true;
 
     // If a response was requested, block until it is received.
-    struct response *resp = get_response(&g_ipc_data.receiver_data, msg_h->id);
+    struct response *resp = get_response(&g_ipc_data.receiver_data, id);
     if (!resp) {
         log(LOGL_ERROR, "BUG! Unable to get response struct!");
         return false;
