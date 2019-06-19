@@ -109,7 +109,8 @@ bool str_is_number(const char *str) {
 const char *log_level_names[] = {
     "[INFO]",
     "[WARN]",
-    "[ERROR]"
+    "[ERROR]",
+    "[BUG]"
 };
 
 void log_impl(enum log_level level, const char *file, int line, const char *fmt, ...) {
@@ -179,9 +180,8 @@ void run_exit_callbacks(void) {
     }
 }
 
-void bail_out(void) {
+__attribute__((noreturn)) void bail_out(void) {
     // TODO: Check if in parent or child process
     run_exit_callbacks();
     _exit(EXIT_FAILURE);
 }
-

@@ -45,6 +45,7 @@
 #include "ivshmem.h"
 #include "ringbuf.h"
 #include "vfio.h"
+#include "ipc.h"
 
 // TODO: Support proper authentication and different libvirt hosts
 #define LIBVIRT_HOST_URI "qemu:///system"
@@ -192,6 +193,121 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
 }
 
+#define NUM_IPC_SOCKETS 3
+#define IPC_SOCKET_IVSHMEM 0
+#define IPC_SOCKET_LIBVIRT 1
+#define IPC_SOCKET_VFIO    2
+
+static inline uint8_t dest_to_socket(uint8_t dest) {
+    switch(dest) {
+        case IPC_DEST_IVSHMEM:
+            return IPC_SOCKET_IVSHMEM;
+        case IPC_DEST_LIBVIRT:
+            return IPC_SOCKET_LIBVIRT;
+        case IPC_DEST_VFIO:
+            return IPC_SOCKET_VFIO;
+        default:
+            log_BUG("Unknown IPC destination %u!", dest);
+    }
+}
+
+static inline uint8_t socket_to_dest(uint8_t socket) {
+    switch (socket) {
+        case IPC_SOCKET_IVSHMEM:
+            return IPC_DEST_IVSHMEM;
+        case IPC_SOCKET_LIBVIRT:
+            return IPC_DEST_LIBVIRT;
+        case IPC_SOCKET_VFIO:
+            return IPC_DEST_VFIO;
+        default:
+            log_BUG("Unknown IPC socket type %u!", socket);
+    }
+}
+
+static inline uint8_t get_socket_index(int sockets[NUM_IPC_SOCKETS], int soc) {
+    for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
+        if (sockets[i] == soc)
+            return i;
+
+    log_BUG("Unknown socket provided!");
+}
+
+static bool handle_message(int sockets[NUM_IPC_SOCKETS], uint8_t src, struct ipc_message *msg) {
+    if (msg->dest != IPC_DEST_MAIN) {
+        // Message needs to be forwarded
+        int socfd = sockets[dest_to_socket(msg->dest)];
+        if (socfd < 0)
+            log_BUG("Invalid IPC destination %u!", msg->dest);
+
+        return ipc_server_send_message(socfd, msg);
+    }
+    ASSERT(msg->type == IPC_TYPE_CMD);
+
+    struct ipc_cmd *cmd = &msg->cmd;
+    struct ipc_message response = {
+        .type = IPC_TYPE_RESP,
+        .dest = src,
+        .fd = -1,
+        .id = msg->id
+    };
+
+    switch(cmd->command) {
+        case MAIN_IPC_CMD_TEST:
+            response.resp.error = false;
+            response.resp.ret = msg->cmd.args[0] << 1;
+            break;
+
+        default:
+            log(LOGL_WARN, "Unknown IPC command %d! Ignoring...", cmd->command);
+            response.resp.error = true;
+            response.resp.ret = 100;
+    }
+
+    if (msg->flags & IPC_FLAG_WANTRESP)
+        return ipc_server_send_message(sockets[dest_to_socket(src)], &response);
+    else
+        return true;
+}
+
+/**
+ * Receive messages from children and handle with handle_message()
+ */
+static void listen_for_messages(int sockets[NUM_IPC_SOCKETS]) {
+    // Initialize epoll to wait for events from event loops
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        goto fail_errno;
+
+    for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++) {
+        if (sockets[i] > 0) {
+            if (add_epoll_fd(epoll_fd, sockets[i], EPOLLIN) < 0)
+                goto fail_errno;
+        }
+    }
+
+    // Wait for events
+    struct epoll_event events[5];
+    int event_count;
+    for(;;) {
+        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+        for(size_t i=0; i<event_count; i++) {
+            int cur_fd = events[i].data.fd;
+            log(LOGL_INFO, "Got message from child!");
+
+            struct ipc_message msg;
+            if (!ipc_server_receive_message(cur_fd, &msg))
+                goto fail_errno;
+
+            int src_dest = socket_to_dest(get_socket_index(sockets, cur_fd));
+            if (!handle_message(sockets, src_dest, &msg))
+                goto fail_errno;
+        }
+    }
+
+fail_errno:
+    log(LOGL_ERROR, "Error encountered while processing IPC messages: %m");
+}
+
 // Entry point for daemon when run in host mode
 static void host_main(void) {
     // Spawn processes for libvirt and ivshmem event loops.
@@ -243,41 +359,21 @@ static void host_main(void) {
     close(main_libvirt_sv[1]);
     close(main_ivshmem_sv[1]);
 
-    // Initialize epoll to wait for events from event loops
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0)
-        goto fail_errno;
+    // listen for messages
+    int sockets[NUM_IPC_SOCKETS];
+    for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
+        sockets[i] = -1;
 
-    if (add_epoll_fd(epoll_fd, main_libvirt_sv[0], EPOLLIN) < 0)
-        goto fail_errno;
-    if (add_epoll_fd(epoll_fd, main_ivshmem_sv[0], EPOLLIN) < 0)
-        goto fail_errno;
+    sockets[IPC_SOCKET_IVSHMEM] = main_ivshmem_sv[0];
+    sockets[IPC_SOCKET_LIBVIRT] = main_libvirt_sv[0];
 
-    // Main event loop
-    struct epoll_event events[5];
-    int event_count;
-    for(;;) {
-        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-        for(size_t i=0; i<event_count; i++) {
-            if (events[i].data.fd == main_libvirt_sv[0]) {
+    listen_for_messages(sockets);
 
-                struct libvirt_event lv_event;
-                ssize_t n = read(main_libvirt_sv[0], &lv_event,
-                                 sizeof(struct libvirt_event));
-
-                if (n < 0) {
-                    log(LOGL_WARN, "Malformed message received from"
-                        " libvirt process! Bailing out.");
-                    bail_out();
-                }
-
-                log(LOGL_INFO, "Got event from libvirt! Type: %d", lv_event.type);
-            }
-        }
-    }
+    // listen_for_messages only returns on error
+    bail_out();
 
 fail_errno:
-    log(LOGL_ERROR, "Daemon init failed: %m");
+    log(LOGL_ERROR, "Error encountered while initializing daemon: %m");
     bail_out();
 }
 
@@ -305,21 +401,17 @@ static void guest_main(void) {
         bail_out();
     }
 
-    // Initialize epoll to wait for events from event loops
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0)
-        goto fail_errno;
+    // listen for messages
+    int sockets[NUM_IPC_SOCKETS];
+    for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
+        sockets[i] = -1;
 
-    if (add_epoll_fd(epoll_fd, main_vfio_sv[0], EPOLLIN) < 0)
-        goto fail_errno;
+    sockets[IPC_SOCKET_VFIO] = main_vfio_sv[0];
 
-    struct epoll_event events[5];
-    int event_count;
-    for(;;) {
-        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-        for(size_t i=0; i<event_count; i++) {
-        }
-    }
+    listen_for_messages(sockets);
+
+    // listen_for_messages only returns on error
+    bail_out();
 
 fail_errno:
     log(LOGL_ERROR, "Daemon init failed: %m");

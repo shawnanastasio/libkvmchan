@@ -2,8 +2,10 @@ SRCS:=library.c ringbuf.c
 DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
 LIBS=-lrt -pthread
+DEBUG:=true
 
-DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c
+DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
+	daemon/ipc.c
 DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
 DAEMON_BIN:=kvmchand
 DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)
@@ -14,8 +16,12 @@ TEST_DEPS:=$(TEST_SRCS:.c=.o)
 TEST_BIN:=test
 TEST_LIBS:=$(shell pkg-config --cflags --libs check)
 
-CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wvla -fpic -fvisibility=hidden -std=gnu99 -g -I. \
+CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wvla -fpic -fvisibility=hidden -std=gnu99 -I. \
 	   -fstack-protector-strong -D_FORITY_SOURCE=2
+
+ifneq ($(DEBUG),false)
+CFLAGS += -g
+endif
 
 COMPILER_NAME:=$(shell $(CC) --version |cut -d' ' -f1 |head -n1)
 ifneq ($(COMPILER_NAME),clang)

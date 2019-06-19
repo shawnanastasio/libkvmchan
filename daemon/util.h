@@ -30,7 +30,8 @@
 enum log_level {
     LOGL_INFO,
     LOGL_WARN,
-    LOGL_ERROR
+    LOGL_ERROR,
+    LOGL_BUG // Internal use only through log_BUG
 };
 
 enum loop_msg_type {
@@ -39,11 +40,8 @@ enum loop_msg_type {
     LOOP_MSG_IVSHMEM, // Message from ivshmem loop
 };
 
-#ifdef __GNUC__
 #define log(level, fmt, ...) log_impl(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#else
-#define log(level, fmt, ...) log_impl(level, __FILE__, __LINE__, __VA_ARGS__)
-#endif
+#define log_BUG(fmt, ...) do { log(LOGL_BUG, fmt, ##__VA_ARGS__); bail_out(); } while (0)
 
 void log_impl(enum log_level level, const char *file, int line, const char *fmt, ...);
 
@@ -80,11 +78,27 @@ bool str_is_number(const char *str);
     ret; \
 })
 
+// Modified EINTR wrapper from chromium
+#define HANDLE_EINTR(x) ({ \
+    typeof(x) eintr_wrapper_result; \
+    do { \
+        eintr_wrapper_result = (x); \
+    } while (eintr_wrapper_result == -1 && errno == EINTR); \
+    eintr_wrapper_result; \
+})
+
+#define ASSERT(x) do { \
+    if (!(x)) { \
+        log(LOGL_ERROR, "Assertion failed: %s", #x); \
+        bail_out(); \
+    } \
+} while (0)
+
 int add_epoll_fd(int epoll_fd, int fd, int event);
 int del_epoll_fd(int epoll_fd, int fd);
 
 bool install_exit_callback(void (*func)(void*), void *arg);
 void run_exit_callbacks(void);
-void bail_out(void);
+__attribute__((noreturn)) void bail_out(void);
 
 #endif // KVMCHAND_UTIL_H
