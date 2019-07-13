@@ -29,12 +29,17 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 
 #include "ipc.h"
 #include "util.h"
 
 struct dispatcher_data {
-    int socfd;
+    bool is_server;
+    union {
+        int socfd; // is_server = false
+        int socfds[NUM_IPC_SOCKETS]; // is_server = true
+    };
 
     // Incremented for each new message
     uint32_t id_counter;
@@ -46,10 +51,22 @@ struct dispatcher_data {
 };
 
 struct receiver_data {
-    int socfd;
+    bool is_server;
+    union {
+        int socfd; // is_server = false
+        int socfds[NUM_IPC_SOCKETS]; // is_server = true
+    };
+
     void (*message_handler)(struct ipc_message *);
+
+    // List of responses received/to be received.
     struct vec_voidp responses;
     pthread_mutex_t responses_mutex;
+
+    // Queue of messages to handle. FIFO.
+    struct vec_voidp message_queue;
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_cond;
 };
 
 struct response {
@@ -68,12 +85,13 @@ struct response {
 };
 
 // Global IPC data for this process
-
 struct ipc_data {
     struct dispatcher_data dispatcher_data;
     struct receiver_data receiver_data;
     pthread_t dispatcher_thread;
     pthread_t receiver_thread;
+    pthread_t response_dispatcher_thread;
+    uint8_t src;
 } g_ipc_data;
 
 static void response_destructor(void *resp_) {
@@ -83,44 +101,85 @@ static void response_destructor(void *resp_) {
     free(resp);
 }
 
-static bool dispatcher_data_init(struct dispatcher_data *data, int socfd) {
-    data->socfd = socfd;
+static bool dispatcher_data_init(struct dispatcher_data *data, bool is_server, int socfd,
+                                 int *socfds) {
+    data->is_server = is_server;
+    if (is_server) {
+        for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
+            data->socfds[i] = socfds[i];
+
+
+    } else {
+        data->socfd = socfd;
+    }
     data->id_counter = 0;
 
     if (!vec_voidp_init(&data->requests, 10, free_destructor))
-        return false;
+        goto fail;
 
-    if (pthread_cond_init(&data->requests_cond, NULL)) {
-        vec_voidp_destroy(&data->requests);
-        return false;
-    }
+    if (pthread_cond_init(&data->requests_cond, NULL))
+        goto fail_requests;
 
-    pthread_mutexattr_t attr;
-    ASSERT(!pthread_mutexattr_init(&attr));
-    ASSERT(!pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK));
-    if (pthread_mutex_init(&data->requests_mutex, &attr)) {
-        pthread_cond_destroy(&data->requests_cond);
-        vec_voidp_destroy(&data->requests);
-        return false;
-    }
+    if (pthread_mutex_init(&data->requests_mutex, NULL))
+        goto fail_requests_cond;
 
     return true;
+
+fail_requests_cond:
+    pthread_cond_destroy(&data->requests_cond);
+fail_requests:
+    vec_voidp_destroy(&data->requests);
+fail:
+    return false;
 }
 
-static bool receiver_data_init(struct receiver_data *data, int socfd,
-                               void (*message_handler)(struct ipc_message *)) {
-    data->socfd = socfd;
+static bool receiver_data_init(struct receiver_data *data, bool is_server, int socfd,
+                               int *socfds, void (*message_handler)(struct ipc_message *)) {
     data->message_handler = message_handler;
-
-    if (!vec_voidp_init(&data->responses, 10, response_destructor))
-        return false;
-
-    if (pthread_mutex_init(&data->responses_mutex, NULL)) {
-        vec_voidp_destroy(&data->responses);
-        return false;
+    data->is_server = is_server;
+    if (is_server) {
+        for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
+            data->socfds[i] = socfds[i];
+    } else {
+        data->socfd = socfd;
     }
 
+    if (!vec_voidp_init(&data->message_queue, 10, free_destructor))
+        goto fail;
+    if (pthread_mutex_init(&data->queue_mutex, NULL))
+        goto fail_message_queue;
+    if (pthread_cond_init(&data->queue_cond, NULL))
+        goto fail_queue_mutex;
+    if (!vec_voidp_init(&data->responses, 10, response_destructor))
+        goto fail_queue_cond;
+    if (pthread_mutex_init(&data->responses_mutex, NULL))
+        goto fail_responses;
+
     return true;
+
+fail_responses:
+    vec_voidp_destroy(&data->responses);
+fail_queue_cond:
+    pthread_cond_destroy(&data->queue_cond);
+fail_queue_mutex:
+    pthread_mutex_destroy(&data->queue_mutex);
+fail_message_queue:
+    vec_voidp_destroy(&data->message_queue);
+fail:
+    return false;
+}
+
+static inline uint8_t dest_to_socket(uint8_t dest) {
+    switch(dest) {
+        case IPC_DEST_IVSHMEM:
+            return IPC_SOCKET_IVSHMEM;
+        case IPC_DEST_LIBVIRT:
+            return IPC_SOCKET_LIBVIRT;
+        case IPC_DEST_VFIO:
+            return IPC_SOCKET_VFIO;
+        default:
+            log_BUG("Unknown IPC destination %u!", dest);
+    }
 }
 
 static bool push_request(struct dispatcher_data *data, struct ipc_message *msg,
@@ -267,7 +326,61 @@ out:
     return ret;
 }
 
-static void *client_dispatcher_thread(void *data_) {
+static bool server_receive_message(int socfd, struct ipc_message *out) {
+    int incoming_fd;
+    ssize_t n = socmsg_recv(socfd, out, sizeof(struct ipc_message), &incoming_fd);
+    if (n <= 0)
+        return false;
+
+    if (out->flags & IPC_FLAG_FD) {
+        if (incoming_fd < 0) {
+            errno = EINVAL;
+            return false;
+        }
+
+        out->fd = incoming_fd;
+    }
+
+    return true;
+}
+
+static void register_response(struct receiver_data *rdata, struct ipc_message *cur) {
+    // Write this message to the appropriate response handle
+    struct response *resp = get_response(rdata, cur->id);
+    ASSERT(resp);
+
+    // Lock struct and write message to it
+    ASSERT(!pthread_mutex_lock(&resp->mutex));
+
+    memcpy(&resp->message, cur, sizeof(struct ipc_message));
+    resp->message_valid = true;
+    ASSERT(!pthread_cond_signal(&resp->cond));
+
+    ASSERT(!pthread_mutex_unlock(&resp->mutex));
+}
+
+static void *response_dispatcher_thread(void *rdata_) {
+    struct receiver_data *rdata = rdata_;
+
+    ASSERT(!pthread_mutex_lock(&rdata->queue_mutex));
+    for(;;) {
+        while (rdata->message_queue.count > 0) {
+            struct ipc_message *cur = rdata->message_queue.data[0];
+
+            // Call message handler
+            rdata->message_handler(cur);
+
+            vec_voidp_remove(&rdata->message_queue, 0);
+        }
+
+        // Wait for more messages
+        ASSERT(!pthread_cond_wait(&rdata->queue_cond, &rdata->queue_mutex));
+    }
+
+    return NULL;
+}
+
+static void *dispatcher_thread(void *data_) {
     struct dispatcher_data *data = data_;
 
     ASSERT(!pthread_mutex_lock(&data->requests_mutex));
@@ -275,18 +388,19 @@ static void *client_dispatcher_thread(void *data_) {
         if (data->requests.count == 0)
             goto skip;
 
-        log(LOGL_INFO, "DEBUG: Got request!");
-
         // Send all pending requests
         size_t initial_count = data->requests.count;
         for (size_t i=0; i<initial_count; i++) {
-            log(LOGL_INFO, "SENDING MESSAGE!");
             struct ipc_message *msg = data->requests.data[0];
             ASSERT(msg);
 
             int fd = (msg->flags & IPC_FLAG_FD) ? msg->fd : -1;
-            if (socmsg_send(data->socfd, msg, sizeof(struct ipc_message), fd) < 0) {
-                log(LOGL_ERROR, "BUG! Unable to send IPC message: %m! fd: %d", data->socfd);
+            int dest = (data->is_server) ? data->socfds[dest_to_socket(msg->dest)]: data->socfd;
+            if (dest < 0)
+                log_BUG("Invalid IPC message destination!");
+
+            if (socmsg_send(dest, msg, sizeof(struct ipc_message), fd) < 0) {
+                log(LOGL_ERROR, "Unable to send IPC message: %m! fd: %d", data->socfd);
                 goto skip;
             }
 
@@ -324,96 +438,158 @@ static void *client_receiver_thread(void *data_) {
             msg.fd = incoming_fd;
         }
 
-        // If this isn't a response, call the message handler
-        if (msg.type != IPC_TYPE_RESP) {
-            if (data->message_handler)
-                data->message_handler(&msg);
-            continue;
+        if (msg.type == IPC_TYPE_RESP) {
+            // If message is response, insert it into response queue
+            register_response(data, &msg);
+        } else {
+            // Otherwise insert message into handle queue so it can be
+            // handled by the response dispatcher thread.
+            void *msg_copy = malloc_w(sizeof(struct ipc_message));
+            memcpy(msg_copy, &msg, sizeof(struct ipc_message));
+
+            ASSERT(!pthread_mutex_lock(&data->queue_mutex));
+            ASSERT(vec_voidp_push_back(&data->message_queue, msg_copy));
+            ASSERT(!pthread_cond_signal(&data->queue_cond));
+            ASSERT(!pthread_mutex_unlock(&data->queue_mutex));
         }
-
-        // Otherwise, get response struct
-        struct response *resp = get_response(data, msg.id);
-        ASSERT(resp);
-
-        // Lock struct and write message to it
-        ASSERT(!pthread_mutex_lock(&resp->mutex));
-
-        memcpy(&resp->message, &msg, sizeof(struct ipc_message));
-        resp->message_valid = true;
-        ASSERT(!pthread_cond_signal(&resp->cond));
-
-        ASSERT(!pthread_mutex_unlock(&resp->mutex));
     }
 
     return NULL;
 }
 
-// Server-facing API
-
 /**
- * Read an incoming IPC message (used by main only)
+ * Server event loop that listens for messages,
+ * forwards them or handles them when applicable.
  */
-bool ipc_server_receive_message(int socfd, struct ipc_message *out) {
-    int incoming_fd;
-    ssize_t n = socmsg_recv(socfd, out, sizeof(struct ipc_message), &incoming_fd);
-    if (n <= 0)
-        return false;
+static void *server_receiver_thread(void *data_) {
+    struct receiver_data *data = data_;
 
-    if (out->flags & IPC_FLAG_FD) {
-        if (incoming_fd < 0) {
-            errno = EINVAL;
-            return false;
+    // Initialize epoll to wait for events from event loops
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        goto fail_errno;
+
+    for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++) {
+        if (data->socfds[i] > 0) {
+            if (add_epoll_fd(epoll_fd, data->socfds[i], EPOLLIN) < 0)
+                goto fail_errno;
         }
-
-        out->fd = incoming_fd;
     }
 
-    return true;
+    // Wait for events
+    struct epoll_event events[5];
+    int event_count;
+    for(;;) {
+        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+        for(int i=0; i<event_count; i++) {
+            int cur_fd = events[i].data.fd;
+            log(LOGL_INFO, "Got message from child!");
+
+            struct ipc_message msg;
+            if (!server_receive_message(cur_fd, &msg))
+                goto fail_errno;
+
+            if (msg.dest != IPC_DEST_MAIN) {
+                // Message needs to be forwarded
+                int socfd = data->socfds[dest_to_socket(msg.dest)];
+                if (socfd < 0)
+                    log_BUG("Invalid IPC destination %u!", msg.dest);
+
+                int fd = (msg.flags & IPC_FLAG_FD) ? msg.fd : -1;
+                if (socmsg_send(socfd, &msg, sizeof(struct ipc_message), fd) < 0)
+                    goto fail_errno;
+
+            } else if (msg.type == IPC_TYPE_RESP) {
+                // Message needs to be inserted into response queue
+                register_response(data, &msg);
+            } else {
+                // Message should be added to handle queue
+                void *msg_copy = malloc_w(sizeof(struct ipc_message));
+                memcpy(msg_copy, &msg, sizeof(struct ipc_message));
+
+                ASSERT(!pthread_mutex_lock(&data->queue_mutex));
+                if (!vec_voidp_push_back(&data->message_queue, msg_copy))
+                    goto fail_errno;
+                ASSERT(!pthread_cond_signal(&data->queue_cond));
+                ASSERT(!pthread_mutex_unlock(&data->queue_mutex));
+            }
+        }
+    }
+
+fail_errno:
+    log(LOGL_ERROR, "Error encountered while processing IPC messages: %m");
+    bail_out();
+    return NULL;
 }
 
 /**
- * Send an IPC message (used by main only)
+ * Initialize g_ipc structure, spawn dispatcher/receiver threads,
+ * and block for incoming messages. Will not return except on error.
+ *
+ * @param socfds           array of sockets
+ * @param src              IPC_DEST_* that corresponds to this process
+ * @param message_handler  handler for received non-response, non-forwarded messages
  */
-bool ipc_server_send_message(int socfd, struct ipc_message *msg) {
-    int fd = (msg->flags & IPC_FLAG_FD) ? msg->fd : -1;
-    return (socmsg_send(socfd, msg, sizeof(struct ipc_message), fd) >= 0);
+void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
+                      void (*message_handler)(struct ipc_message *)) {
+    if (!dispatcher_data_init(&g_ipc_data.dispatcher_data, true, -1, socfds))
+        goto fail;
+
+    if (!receiver_data_init(&g_ipc_data.receiver_data, true, -1, socfds, message_handler))
+        goto fail;
+
+    // Spawn dispatcher thread
+    if ((errno = pthread_create(&g_ipc_data.dispatcher_thread, NULL, dispatcher_thread,
+                                &g_ipc_data.dispatcher_data)))
+        goto fail;
+
+    // Spawn receiver thread
+    if ((errno = pthread_create(&g_ipc_data.receiver_thread, NULL, server_receiver_thread,
+                                &g_ipc_data.receiver_data)))
+        goto fail;
+
+    // Block and wait for messages to handle from the receiver thread
+    response_dispatcher_thread(&g_ipc_data.receiver_data);
+
+fail:
+    log(LOGL_ERROR, "Error encountered in IPC server: %m!");
 }
-
-
-// Client-facing API
 
 /**
  * Initialize g_ipc structure and spawn dispatcher/receiver threads.
  *
  * @param socfd            socket connection to main thread
+ * @param src              IPC_DEST_* that corresponds to this process
  * @param message_handler  handler for received non-response messages
  * @return       success?
  */
-bool ipc_start(int socfd, void (*message_handler)(struct ipc_message *)) {
-    if (!dispatcher_data_init(&g_ipc_data.dispatcher_data, socfd))
+bool ipc_start(int socfd, uint8_t src, void (*message_handler)(struct ipc_message *)) {
+    g_ipc_data.src = src;
+    if (!dispatcher_data_init(&g_ipc_data.dispatcher_data, false, socfd, NULL))
         goto fail;
 
-    if (!receiver_data_init(&g_ipc_data.receiver_data, socfd, message_handler))
+    if (!receiver_data_init(&g_ipc_data.receiver_data, false, socfd, NULL, message_handler))
         goto fail;
 
     // Spawn dispatcher thread
-    int ret;
-    if ((ret = pthread_create(&g_ipc_data.dispatcher_thread, NULL, client_dispatcher_thread,
-                              &g_ipc_data.dispatcher_data))) {
-        errno = ret;
+    if ((errno = pthread_create(&g_ipc_data.dispatcher_thread, NULL, dispatcher_thread,
+                                &g_ipc_data.dispatcher_data)))
         goto fail;
-    }
 
     // Spawn receiver thread
-    if ((ret = pthread_create(&g_ipc_data.receiver_thread, NULL, client_receiver_thread,
-                              &g_ipc_data.receiver_data))) {
-        errno = ret;
+    if ((errno = pthread_create(&g_ipc_data.receiver_thread, NULL, client_receiver_thread,
+                                &g_ipc_data.receiver_data)))
         goto fail;
-    }
+
+    // Spawn response dispatcher thread
+    if ((errno = pthread_create(&g_ipc_data.response_dispatcher_thread, NULL,
+                                response_dispatcher_thread,
+                                &g_ipc_data.receiver_data)))
+        goto fail;
 
     return true;
 fail:
-    log(LOGL_ERROR, "Failed to start dispatcher: %m!");
+    log(LOGL_ERROR, "Failed to start IPC threads: %m!");
     return false;
 }
 
@@ -427,6 +603,9 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
     // stack or heap and the vector assumes heap, so copy it first.
     struct ipc_message *msg_h = malloc_w(sizeof(struct ipc_message));
     memcpy(msg_h, msg, sizeof(struct ipc_message));
+
+    // Set src flag
+    msg_h->src = g_ipc_data.src;
 
     uint32_t id;
     if (!push_request(&g_ipc_data.dispatcher_data, msg_h, &id)) {

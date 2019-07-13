@@ -25,7 +25,18 @@
 
 #define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
 
+#define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
+
 #define IVSHMEM_SOCK_PATH "/tmp/kvmchand_ivshmem"
+
+// Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
+#if __has_include(<sys/memfd.h>)
+#include <sys/memfd.h>
+#else
+int memfd_create(const char *name, unsigned int flags);
+#endif
+
+extern long SYSTEM_PAGE_SIZE;
 
 enum log_level {
     LOGL_INFO,

@@ -44,16 +44,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-// Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
-#if __has_include(<sys/memfd.h>)
-#include <sys/memfd.h>
-#else
-int memfd_create(const char *name, unsigned int flags);
-#endif
-
 #include "util.h"
 #include "ivshmem.h"
 #include "libkvmchan-priv.h"
+#include "ipc.h"
 
 struct ringbuf_conn_data {
     ringbuf_t host_to_client_rb;
@@ -142,13 +136,6 @@ static void client_info_destructor(void *client_) {
 static void cleanup_socket_path(void *path_) {
     const char *path = path_;
     unlink(path);
-}
-
-static bool handle_loop_message(int fd, enum loop_msg_type type) {
-    log(LOGL_INFO, "Got message from other loop!");
-
-    // TODO: implement me
-    return true;
 }
 
 static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, bool makenew,
@@ -312,21 +299,6 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
     if (!info)
         return -1;
 
-#if 0
-    // Get Domain ID from libvirt thread
-    unsigned int id;
-    if (!get_domain_id_by_pid(cred.pid, &id)) {
-        log(LOGL_ERROR, "Couldn't lookup PID %d in libvirt. "
-                "Is the client a libvirt-managed QEMU process?", cred.pid);
-        return -1;
-    }
-
-    if (id > 0xFFFF) {
-        log(LOGL_ERROR, "libvirt domain id too high: %d (must be less than 0xFFFF). "
-                "Rejecting client.", id);
-        return -1;
-    }
-#endif
     // ID that corresponds to the IVPosition register.
     // For the first connection, id is always 1.
     int64_t id;
@@ -444,7 +416,17 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
     return true;
 }
 
+/**
+ * Handle IPC messages from other kvmchand processes
+ */
+static void handle_ipc_message(struct ipc_message *msg) {
+
+}
+
 void run_ivshmem_loop(int mainsoc, const char *sock_path) {
+    if (!ipc_start(mainsoc, IPC_DEST_IVSHMEM, handle_ipc_message))
+        goto error;
+
     // Set up the socket and bind it to the given path
     int socfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socfd < 0)
@@ -472,8 +454,6 @@ void run_ivshmem_loop(int mainsoc, const char *sock_path) {
     if (epoll_fd < 0)
         goto error;
     if (add_epoll_fd(epoll_fd, socfd, EPOLLIN) < 0)
-        goto error;
-    if (add_epoll_fd(epoll_fd, mainsoc, EPOLLIN) < 0)
         goto error;
 
     // Initialize ivshmem_server

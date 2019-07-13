@@ -22,6 +22,11 @@
 
 #include <stdbool.h>
 
+#define NUM_IPC_SOCKETS 3
+#define IPC_SOCKET_IVSHMEM 0
+#define IPC_SOCKET_LIBVIRT 1
+#define IPC_SOCKET_VFIO    2
+
 struct ipc_message {
     uint8_t type;
 #define IPC_TYPE_CMD  0
@@ -34,11 +39,12 @@ struct ipc_message {
         } cmd;
 
         struct ipc_resp {
-            bool error;
             int64_t ret;
+            bool error;
         } resp;
     };
 
+    uint8_t src;
     uint8_t dest;
 #define IPC_DEST_MAIN    0
 #define IPC_DEST_IVSHMEM 1
@@ -74,12 +80,22 @@ struct ipc_message {
  */
 #define MAIN_IPC_CMD_TEST 0
 
-// Server-facing API
-bool ipc_server_receive_message(int socfd, struct ipc_message *out);
-bool ipc_server_send_message(int socfd, struct ipc_message *msg);
+/**
+ * Initialize a new vchan.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of allowed client
+ * args[2] - (u32) port
+ * args[3] - (u64) read_min
+ * args[4] - (u64) write_min
+ *
+ * resp.error - error?
+ * resp.ret   - ?
+ */
+#define MAIN_IPC_CMD_VCHAN_INIT 1
 
-// Client-facing API
-bool ipc_start(int socfd, void (*message_handler)(struct ipc_message *));
+void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
+                      void (*message_handler)(struct ipc_message *));
+bool ipc_start(int socfd, uint8_t src, void (*message_handler)(struct ipc_message *));
 bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response);
 
 #endif // KVMCHAND_IPC_H

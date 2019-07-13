@@ -29,6 +29,14 @@
 
 #include "util.h"
 
+long SYSTEM_PAGE_SIZE;
+
+__attribute__((constructor))
+void initialize_util(void) {
+    SYSTEM_PAGE_SIZE = sysconf(_SC_PAGESIZE);
+    ASSERT(SYSTEM_PAGE_SIZE);
+}
+
 #define vec_template(T) \
 bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destructor)(T)) { \
     if (initial_size < 10) \

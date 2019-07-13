@@ -49,6 +49,8 @@
 #include "util.h"
 #include "libvirt.h"
 #include "libkvmchan-priv.h"
+#include "connections.h"
+#include "ipc.h"
 
 struct domain_info {
     char uuid_str[VIR_UUID_STRING_BUFLEN];
@@ -62,12 +64,9 @@ static sem_t running_domains_sem;
 // libvirt connection
 static virConnectPtr conn;
 
-// IPC socket fds
-static int main_soc;
-
 static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     bool ret = false;
-    sem_wait(&running_domains_sem);
+    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)));
 
     for (size_t i=0; i<running_domains.count; i++) {
         struct domain_info *cur = running_domains.data[i];
@@ -84,7 +83,7 @@ static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     }
 
 out:
-    sem_post(&running_domains_sem);
+    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)));
     return ret;
 }
 
@@ -338,11 +337,13 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             sem_post(&running_domains_sem);
 
             // Inform main loop of the new VM
+            /*
             struct libvirt_event ev = { .type = LVE_TYPE_STARTED };
             if (write(main_soc, &ev, sizeof(ev)) < 0) {
                 log(LOGL_WARN, "Failed to send event to main process!");
                 bail_out();
             }
+            */
 
             break;
         case VIR_DOMAIN_EVENT_STOPPED:
@@ -396,39 +397,15 @@ static void connect_close_callback(virConnectPtr conn, int reason,
     log(LOGL_ERROR, "Connection closed due to unknown reason");
 }
 
-static void *loop_message_handler(void *unused) {
-    ignore_value(unused);
-
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0)
-        goto fail_errno;
-    if (add_epoll_fd(epoll_fd, main_soc, EPOLLIN) < 0)
-        goto fail_errno;
-
-    struct epoll_event events[5];
-    int event_count;
-    for(;;) {
-        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-        for(int i=0; i<event_count; i++) {
-            // TODO: implement me
-            //log(LOGL_INFO, "Got message from other loop!");
-        }
-    }
-
-fail_errno:
-    ;
-    int *errno_h = malloc_w(sizeof(int));
-    *errno_h = errno;
-    return errno_h;
+/**
+ * Handle IPC messages from other kvmchand processes
+ */
+static void handle_ipc_message(struct ipc_message *msg) {
 
 }
 
 void run_libvirt_loop(int mainsoc, const char *host_uri) {
-    main_soc = mainsoc;
-
-    // Spawn loop message handler
-    pthread_t handler;
-    if (pthread_create(&handler, NULL, loop_message_handler, NULL))
+    if (!ipc_start(mainsoc, IPC_DEST_LIBVIRT, handle_ipc_message))
         goto error;
 
     // Initialize libvirt API

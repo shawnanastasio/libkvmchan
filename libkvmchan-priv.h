@@ -82,6 +82,9 @@ typedef struct shmem_hdr {
     ringbuf_pub_t client_to_host_pub;
 } shmem_hdr_t;
 
+/* Maximum ring size (512MB). Chosen arbitrarily */
+#define MAX_RING_SIZE 0x20000000
+
 /* Size of SHM region between client and kvmchand */
 #define DAEMON_SHM_SIZE 0x100000
 
@@ -109,6 +112,5 @@ typedef struct shmem_hdr {
 #else
 # define ignore_value(x) ((void) (x))
 #endif
-
 
 #endif // LIBKVMCHAN_PRIV_H
