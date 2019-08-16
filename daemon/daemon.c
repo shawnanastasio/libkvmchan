@@ -340,6 +340,10 @@ static void host_main(void) {
     close(main_libvirt_sv[1]);
     close(main_ivshmem_sv[1]);
 
+    // Initialize connections database
+    if (!connections_init())
+        goto fail_errno;
+
     // listen for messages
     int sockets[NUM_IPC_SOCKETS];
     for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
