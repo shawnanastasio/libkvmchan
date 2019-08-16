@@ -48,6 +48,7 @@
 #include "vfio.h"
 #include "ipc.h"
 #include "connections.h"
+#include "libkvmchan-priv.h"
 
 // TODO: Support proper authentication and different libvirt hosts
 #define LIBVIRT_HOST_URI "qemu:///system"
@@ -63,7 +64,39 @@ static void guest_main(void);
 
 /// Helper functions
 
-static void daemonize() {
+static bool validate_runtime_dir(void) {
+    struct stat s;
+    if (stat(RUNTIME_BASE_DIR, &s) < 0) {
+        if (errno == ENOENT) {
+            // Doesn't exist, create it
+            if (mkdir(RUNTIME_BASE_DIR, 0755) < 0)
+                goto error;
+
+            return true;
+        } else
+            goto error;
+    }
+
+    // Path exists, validate type and permissions
+    if (!(s.st_mode & S_IFDIR)) {
+        log(LOGL_ERROR, "Runtime directory is not a directory: %s", RUNTIME_BASE_DIR);
+        return false;
+    }
+
+    if ((s.st_mode & ~S_IFMT) != 0755) {
+        // Try to change permissions
+        if (chmod(RUNTIME_BASE_DIR, 0755) < 0)
+            goto error;
+    }
+
+    return true;
+
+error:
+    log(LOGL_ERROR, "Unable to create runtime directory at %s: %m", RUNTIME_BASE_DIR);
+    return false;
+}
+
+static void daemonize(void) {
     // Fork to background
     pid_t child = fork();
     if (child < 0) {
@@ -185,6 +218,11 @@ int main(int argc, char **argv) {
         log(LOGL_ERROR, "Failed to install SIGHUP handler: %m");
         return EXIT_FAILURE;
     }
+
+    // Verify runtime base dir exists and has correct permissions
+    if (!validate_runtime_dir())
+        return EXIT_FAILURE;
+
     // Start daemon
     if (guest)
         guest_main();
@@ -292,7 +330,7 @@ static void host_main(void) {
         // Close unused socketpair fds
         close(main_ivshmem_sv[0]);
 
-        run_ivshmem_loop(main_ivshmem_sv[1], IVSHMEM_SOCK_PATH);
+        run_ivshmem_loop(main_ivshmem_sv[1]);
 
         // NOTREACHED
         bail_out();

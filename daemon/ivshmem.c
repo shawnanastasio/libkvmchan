@@ -423,26 +423,26 @@ static void handle_ipc_message(struct ipc_message *msg) {
 
 }
 
-void run_ivshmem_loop(int mainsoc, const char *sock_path) {
+void run_ivshmem_loop(int mainsoc) {
     if (!ipc_start(mainsoc, IPC_DEST_IVSHMEM, handle_ipc_message))
         goto error;
 
-    // Set up the socket and bind it to the given path
+    // Set up the socket and bind it
     int socfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socfd < 0)
         goto error;
 
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path)-1);
+    strncpy(addr.sun_path, IVSHMEM_SOCK_PATH, sizeof(addr.sun_path)-1);
     if (bind(socfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_un)) < 0)
         goto error;
 
     // Set proper permissions on the socket
-    if (chmod(sock_path, 0777) < 0)
+    if (chmod(IVSHMEM_SOCK_PATH, 0666) < 0)
         goto error;
 
     // Install exit handler to remove socket
-    if (!install_exit_callback(cleanup_socket_path, (void *)sock_path))
+    if (!install_exit_callback(cleanup_socket_path, (void *)IVSHMEM_SOCK_PATH))
         goto error;
 
     // Start listening

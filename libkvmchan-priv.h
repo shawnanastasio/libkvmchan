@@ -24,6 +24,16 @@
 
 #include <ringbuf.h>
 
+// Base path for run-time sockets/config
+#define RUNTIME_BASE_DIR        "/tmp/kvmchand"
+
+// Socket path used by ivshmem server
+#define IVSHMEM_SOCK_PATH       (RUNTIME_BASE_DIR "/ivshmem_socket")
+
+// Socket path used by kvmchand localhandler
+#define LOCALHANDLER_SOCK_PATH  (RUNTIME_BASE_DIR "/localhandler_socket")
+
+
 /* client<->kvmchand API */
 
 #define KVMCHAND_API_VERSION 1
