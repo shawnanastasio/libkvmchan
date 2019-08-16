@@ -187,9 +187,11 @@ static bool push_request(struct dispatcher_data *data, struct ipc_message *msg,
     bool res = false;
     ASSERT(!pthread_mutex_lock(&data->requests_mutex));
 
-    // Update special fields (id, remote)
-    msg->id = data->id_counter++;
-    *id_out = msg->id;
+    // Update ID field if this isn't a response
+    if (msg->type == IPC_TYPE_CMD) {
+        msg->id = data->id_counter++;
+        *id_out = msg->id;
+    }
 
     if (!vec_voidp_push_back(&data->requests, msg))
         goto out;
