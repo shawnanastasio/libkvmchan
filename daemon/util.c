@@ -25,6 +25,8 @@
 #include <ctype.h>
 
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/epoll.h>
 
 #include "util.h"
@@ -193,3 +195,70 @@ __attribute__((noreturn)) void bail_out(void) {
     run_exit_callbacks();
     _exit(EXIT_FAILURE);
 }
+
+ssize_t socmsg_send(int socfd, void *data, size_t len, int fd) {
+    union {
+        char cmsgbuf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } u;
+
+    struct cmsghdr *cmsg;
+    struct iovec iov = { .iov_base = data, .iov_len = len };
+    struct msghdr msg = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_flags = 0,
+        .msg_control = (fd > 0) ? u.cmsgbuf : NULL,
+        .msg_controllen = (fd > 0) ? CMSG_LEN(sizeof(int)) : 0,
+    };
+
+    /* Initialize the control message to hand off the fd */
+    if (fd > 0) {
+        cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+        *(int *)CMSG_DATA(cmsg) = fd;
+    }
+
+    return sendmsg(socfd, &msg, 0);
+}
+
+ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out) {
+    ssize_t s;
+    union {
+        char cmsgbuf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } u;
+
+    struct cmsghdr *cmsg;
+    struct iovec iov = { .iov_base = buf, .iov_len = len };
+    struct msghdr msg = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_flags = 0,
+        .msg_control = u.cmsgbuf,
+        .msg_controllen = CMSG_LEN(sizeof(int))
+    };
+
+    if ((s = recvmsg(socfd, &msg, 0)) < 0)
+        return s;
+
+    if (fd_out) {
+        cmsg = CMSG_FIRSTHDR(&msg);
+        if (msg.msg_controllen != CMSG_LEN(sizeof(int))) {
+            *fd_out = -1;
+            goto out;
+        }
+
+        *fd_out = *((int *)CMSG_DATA(cmsg));
+    }
+
+out:
+    return s;
+}
+

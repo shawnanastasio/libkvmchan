@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+#include <sys/types.h>
+
 #define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
@@ -109,5 +111,9 @@ int del_epoll_fd(int epoll_fd, int fd);
 bool install_exit_callback(void (*func)(void*), void *arg);
 void run_exit_callbacks(void);
 __attribute__((noreturn)) void bail_out(void);
+
+
+ssize_t socmsg_send(int socfd, void *data, size_t len, int fd);
+ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out);
 
 #endif // KVMCHAND_UTIL_H
