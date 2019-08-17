@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <assert.h>
+#include <inttypes.h>
 
 #include <unistd.h>
 #include <semaphore.h>
@@ -66,7 +67,7 @@ static virConnectPtr conn;
 
 static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     bool ret = false;
-    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)));
+    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
 
     for (size_t i=0; i<running_domains.count; i++) {
         struct domain_info *cur = running_domains.data[i];
@@ -83,7 +84,30 @@ static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     }
 
 out:
-    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)));
+    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
+    return ret;
+}
+
+static bool get_pid_by_domain_id(unsigned int id, pid_t *pid_out) {
+    bool ret = false;
+    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
+
+    for (size_t i=0; i<running_domains.count; i++) {
+        struct domain_info *cur = running_domains.data[i];
+
+        virDomainPtr dom = virDomainLookupByUUIDString(conn, cur->uuid_str);
+        if (!dom)
+            goto out;
+
+        if (virDomainGetID(dom) == id) {
+            *pid_out = cur->pid;
+            ret = true;
+            goto out;
+        }
+    }
+
+out:
+    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
     return ret;
 }
 
@@ -401,7 +425,31 @@ static void connect_close_callback(virConnectPtr conn, int reason,
  * Handle IPC messages from other kvmchand processes
  */
 static void handle_ipc_message(struct ipc_message *msg) {
+    struct ipc_cmd *cmd = &msg->cmd;
+    struct ipc_message response = {
+        .type = IPC_TYPE_RESP,
+        .dest = msg->src,
+        .fd = -1,
+        .id = msg->id
+    };
 
+    switch(cmd->command) {
+        case LIBVIRT_IPC_CMD_GET_PID_BY_ID: {
+            int pid = -1;
+            response.resp.error = get_pid_by_domain_id((uint32_t)cmd->args[0],
+                                                       &pid);
+            response.resp.ret = (pid_t)pid;
+            break;
+        }
+
+        default:
+            log_BUG("Unknown IPC command received in libvirt loop: %"PRIu64, cmd->command);
+    }
+
+    if (msg->flags & IPC_FLAG_WANTRESP) {
+        if (!ipc_send_message(&response, NULL))
+            log_BUG("Unable to send response to IPC message!");
+    }
 }
 
 void run_libvirt_loop(int mainsoc, const char *host_uri) {
