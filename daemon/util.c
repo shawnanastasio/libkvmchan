@@ -39,8 +39,8 @@ void initialize_util(void) {
     ASSERT(SYSTEM_PAGE_SIZE);
 }
 
-#define vec_template(T) \
-bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destructor)(T)) { \
+#define vec_template(Tname, T) \
+bool vec_ ## Tname ## _init(struct vec_ ## Tname *v, size_t initial_size, void (*destructor)(T)) { \
     if (initial_size < 10) \
         initial_size = 10; \
 \
@@ -54,7 +54,7 @@ bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destruc
     return true; \
 }; \
 \
-bool vec_ ## T ## _push_back(struct vec_ ## T *v, T element) { \
+bool vec_ ## Tname ## _push_back(struct vec_ ## Tname *v, T element) { \
     if (v->size == v->count) { \
         /* double array size */ \
         size_t new_size = v->size * 2; \
@@ -69,12 +69,12 @@ bool vec_ ## T ## _push_back(struct vec_ ## T *v, T element) { \
     return true; \
 } \
 \
-T vec_ ## T ## _at(struct vec_ ## T *v, size_t i) { \
+T vec_ ## Tname ## _at(struct vec_ ## Tname *v, size_t i) { \
     assert(i < v->count); \
     return v->data[i]; \
 } \
 \
-void vec_ ## T ## _remove(struct vec_ ## T *v, size_t i) { \
+void vec_ ## Tname ## _remove(struct vec_ ## Tname *v, size_t i) { \
     assert(i < v->count); \
 \
     if (v->destructor) \
@@ -84,14 +84,14 @@ void vec_ ## T ## _remove(struct vec_ ## T *v, size_t i) { \
         memmove(v->data + i, v->data + i + 1, sizeof(T) * (v->count - i - 1)); \
     v->count -= 1; \
 } \
-void vec_ ## T ## _destroy(struct vec_ ## T *v) { \
+void vec_ ## Tname ## _destroy(struct vec_ ## Tname *v) { \
     size_t s = v->count; \
     while (s-- > 0) { \
-        vec_ ## T ## _remove(v, s); \
+        vec_ ## Tname ## _remove(v, s); \
     } \
     free(v->data); \
 } \
-bool vec_ ## T ## _contains(struct vec_ ## T *v, T element, T ## _comparator comparator) { \
+bool vec_ ## Tname ## _contains(struct vec_ ## Tname *v, T element, Tname ## _comparator comparator) { \
     for (size_t i=0; i<v->count; i++) { \
         if (!comparator(v->data[i], element)) \
             return true; \
@@ -99,8 +99,9 @@ bool vec_ ## T ## _contains(struct vec_ ## T *v, T element, T ## _comparator com
     return false; \
 }
 
-vec_template(voidp)
-vec_template(int)
+vec_template(voidp, void*)
+vec_template(int, int)
+vec_template(u32, uint32_t)
 
 void free_destructor(void *element) {
     free(element);

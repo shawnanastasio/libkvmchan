@@ -20,6 +20,7 @@
 #ifndef KVMCHAND_UTIL_H
 #define KVMCHAND_UTIL_H
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
 
@@ -56,25 +57,24 @@ enum loop_msg_type {
 
 void log_impl(enum log_level level, const char *file, int line, const char *fmt, ...);
 
-typedef void * voidp;
-
-#define vec_template_proto(T) \
-typedef int (*T ## _comparator)(T, T); \
-struct vec_## T { \
+#define vec_template_proto(Tname, T) \
+typedef int (*Tname ## _comparator)(T, T); \
+struct vec_## Tname { \
     T *data; \
     size_t size; \
     size_t count; \
     void (*destructor)(T); \
 }; \
-bool vec_ ## T ## _init(struct vec_ ## T *v, size_t initial_size, void (*destructor)(T)); \
-bool vec_ ## T ## _push_back(struct vec_ ## T *v, T element); \
-T vec_ ## T ## _at(struct vec_ ## T *v, size_t i); \
-void vec_ ## T ## _remove(struct vec_ ## T *v, size_t i); \
-void vec_ ## T ## _destroy(struct vec_ ## T *v); \
-bool vec_ ## T ## _contains(struct vec_ ## T *v, T element, T ## _comparator comparator);
+bool vec_ ## Tname ## _init(struct vec_ ## Tname *v, size_t initial_size, void (*destructor)(T)); \
+bool vec_ ## Tname ## _push_back(struct vec_ ## Tname *v, T element); \
+T vec_ ## Tname ## _at(struct vec_ ## Tname *v, size_t i); \
+void vec_ ## Tname ## _remove(struct vec_ ## Tname *v, size_t i); \
+void vec_ ## Tname ## _destroy(struct vec_ ## Tname *v); \
+bool vec_ ## Tname ## _contains(struct vec_ ## Tname *v, T element, Tname ## _comparator comparator);
 
-vec_template_proto(voidp)
-vec_template_proto(int)
+vec_template_proto(voidp, void*)
+vec_template_proto(int, int)
+vec_template_proto(u32, uint32_t)
 
 void free_destructor(void *element);
 bool str_is_number(const char *str);
