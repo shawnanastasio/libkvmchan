@@ -25,11 +25,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
-#include <pthread.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include "ipc.h"
 #include "util.h"
@@ -434,6 +436,10 @@ static void *server_receiver_thread(void *data_) {
                 int fd = (msg.flags & IPC_FLAG_FD) ? msg.fd : -1;
                 if (socmsg_send(socfd, &msg, sizeof(struct ipc_message), fd) < 0)
                     goto fail_errno;
+
+                // Close fd now that we're done forwarding it
+                if (fd > 0)
+                    close(fd);
 
             } else if (msg.type == IPC_TYPE_RESP) {
                 // Message needs to be inserted into response queue
