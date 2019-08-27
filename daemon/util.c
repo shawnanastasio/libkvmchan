@@ -93,7 +93,9 @@ void vec_ ## Tname ## _destroy(struct vec_ ## Tname *v) { \
 } \
 bool vec_ ## Tname ## _contains(struct vec_ ## Tname *v, T element, Tname ## _comparator comparator) { \
     for (size_t i=0; i<v->count; i++) { \
-        if (!comparator(v->data[i], element)) \
+        if (comparator && !comparator(v->data[i], element)) \
+            return true; \
+        else if (!comparator && (v->data[i] == element)) \
             return true; \
     } \
     return false; \
