@@ -42,12 +42,14 @@
 #include <sys/socket.h>
 
 #include "util.h"
+#include "config.h"
 #include "libvirt.h"
 #include "ivshmem.h"
 #include "ringbuf.h"
 #include "vfio.h"
 #include "ipc.h"
 #include "connections.h"
+#include "localhandler.h"
 #include "libkvmchan-priv.h"
 
 // TODO: Support proper authentication and different libvirt hosts
@@ -233,61 +235,32 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
 }
 
-
 static void handle_message(struct ipc_message *msg) {
-    ASSERT(msg);
     struct ipc_cmd *cmd = &msg->cmd;
     struct ipc_message response = {
         .type = IPC_TYPE_RESP,
+        .resp.error = true,
         .dest = msg->src,
         .fd = -1,
         .id = msg->id
     };
 
     switch(cmd->command) {
-        case MAIN_IPC_CMD_TEST:
-            response.resp.error = false;
-            response.resp.ret = msg->cmd.args[0] << 1;
+        case MAIN_IPC_CMD_VCHAN_INIT:
+            response.resp.error = !vchan_init((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
+                                           (uint32_t)cmd->args[2], (uint64_t)cmd->args[3],
+                                           (uint64_t)cmd->args[4], (uint32_t *)&response.resp.ret);
             break;
 
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }
 
-    if (!ipc_send_message(&response, NULL))
-        log_BUG("Unable to send response to IPC message!");
-}
-#if 0
-static bool handle_message(int sockets[NUM_IPC_SOCKETS], struct ipc_message *msg) {
-
-    struct ipc_cmd *cmd = &msg->cmd;
-    struct ipc_message response = {
-        .type = IPC_TYPE_RESP,
-        .dest = msg->src,
-        .fd = -1,
-        .id = msg->id
-    };
-
-    switch(cmd->command) {
-        case MAIN_IPC_CMD_TEST:
-            response.resp.error = false;
-            response.resp.ret = msg->cmd.args[0] << 1;
-            break;
-
-        case MAIN_IPC_CMD_VCHAN_INIT:
-            //vchan_init();
-
-        default:
-            log(LOGL_WARN, "Unknown IPC command %d! Ignoring...", cmd->command);
-            response.resp.error = true;
+    if (msg->flags & IPC_FLAG_WANTRESP) {
+        if (!ipc_send_message(&response, NULL))
+            log_BUG("Unable to send response to IPC message!");
     }
-
-    if (msg->flags & IPC_FLAG_WANTRESP)
-        return ipc_server_send_message(sockets[dest_to_socket(msg->src)], &response);
-    else
-        return true;
 }
-#endif
 
 // Entry point for daemon when run in host mode
 static void host_main(void) {
@@ -296,13 +269,15 @@ static void host_main(void) {
     // security sandboxing and increases isolation.
 
     // Create socketpairs for IPC
-    int main_libvirt_sv[2], main_ivshmem_sv[2];
+    int main_libvirt_sv[2], main_ivshmem_sv[2], main_localhandler_sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_libvirt_sv) < 0)
         goto fail_errno;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_ivshmem_sv) < 0)
         goto fail_errno;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_localhandler_sv) < 0)
+        goto fail_errno;
 
-    pid_t libvirt, ivshmem;
+    pid_t libvirt, ivshmem, localhandler;
 
     // Spawn libvirt process
     if ((libvirt = fork()) < 0) {
@@ -336,9 +311,26 @@ static void host_main(void) {
         bail_out();
     }
 
+    // Spawn localhandler process
+    if ((localhandler = fork()) < 0) {
+        goto fail_errno;
+    } else if (localhandler == 0) {
+        // Get notified when parent exits
+        prctl(PR_SET_PDEATHSIG, SIGHUP);
+
+        // Close unused socketpair fds
+        close(main_localhandler_sv[0]);
+
+        run_localhandler_loop(main_localhandler_sv[1]);
+
+        // NOTREACHED
+        bail_out();
+    }
+
     // Close unused fds
     close(main_libvirt_sv[1]);
     close(main_ivshmem_sv[1]);
+    close(main_localhandler_sv[1]);
 
     // Initialize connections database
     if (!connections_init())
@@ -351,6 +343,7 @@ static void host_main(void) {
 
     sockets[IPC_SOCKET_IVSHMEM] = main_ivshmem_sv[0];
     sockets[IPC_SOCKET_LIBVIRT] = main_libvirt_sv[0];
+    sockets[IPC_SOCKET_LOCALHANDLER] = main_localhandler_sv[0];
 
     ipc_server_start(sockets, IPC_DEST_MAIN, handle_message);
 

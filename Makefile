@@ -5,7 +5,7 @@ LIBS=-lrt -pthread
 DEBUG:=true
 
 DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
-	daemon/ipc.c daemon/connections.c
+	daemon/ipc.c daemon/connections.c daemon/localhandler.c
 DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
 DAEMON_BIN:=kvmchand
 DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)

@@ -109,8 +109,6 @@ static bool dispatcher_data_init(struct dispatcher_data *data, bool is_server, i
     if (is_server) {
         for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
             data->socfds[i] = socfds[i];
-
-
     } else {
         data->socfd = socfd;
     }
@@ -179,6 +177,8 @@ static inline uint8_t dest_to_socket(uint8_t dest) {
             return IPC_SOCKET_LIBVIRT;
         case IPC_DEST_VFIO:
             return IPC_SOCKET_VFIO;
+        case IPC_DEST_LOCALHANDLER:
+            return IPC_SOCKET_LOCALHANDLER;
         default:
             log_BUG("Unknown IPC destination %u!", dest);
     }
@@ -421,7 +421,6 @@ static void *server_receiver_thread(void *data_) {
         event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
         for(int i=0; i<event_count; i++) {
             int cur_fd = events[i].data.fd;
-            log(LOGL_INFO, "Got message from child!");
 
             struct ipc_message msg;
             if (!server_receive_message(cur_fd, &msg))
@@ -546,10 +545,10 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
     struct ipc_message *msg_h = malloc_w(sizeof(struct ipc_message));
     memcpy(msg_h, msg, sizeof(struct ipc_message));
 
-    // Set src flag
+    // Set src field
     msg_h->src = g_ipc_data.src;
 
-    uint32_t id;
+    uint32_t id = 0;
     if (!push_request(&g_ipc_data.dispatcher_data, msg_h, &id)) {
         free(msg_h);
         return false;

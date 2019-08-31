@@ -56,6 +56,9 @@
 struct domain_info {
     char uuid_str[VIR_UUID_STRING_BUFLEN];
     pid_t pid; // PID of qemu process
+
+    struct vec_u32 indices; // Allocated PCI device indices
+    uint32_t index_last;    // Last allocated PCI device index
 };
 
 // Vec of domain_info structs for currently running domains
@@ -88,7 +91,7 @@ out:
     return ret;
 }
 
-static bool get_pid_by_domain_id(unsigned int id, pid_t *pid_out) {
+static bool get_pid_by_domain_id(uint32_t id, pid_t *pid_out) {
     bool ret = false;
     ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
 
@@ -109,6 +112,68 @@ static bool get_pid_by_domain_id(unsigned int id, pid_t *pid_out) {
 out:
     ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
     return ret;
+}
+
+static bool get_info_by_domain_id(uint32_t id, struct domain_info **info_out) {
+    bool ret = false;
+    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
+
+    for (size_t i=0; i<running_domains.count; i++) {
+        struct domain_info *cur = running_domains.data[i];
+
+        virDomainPtr dom = virDomainLookupByUUIDString(conn, cur->uuid_str);
+        if (!dom)
+            goto out;
+
+        if (virDomainGetID(dom) == id) {
+            *info_out = cur;
+            ret = true;
+            goto out;
+        }
+    }
+
+out:
+    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
+    return ret;
+}
+
+/**
+ * Allocate a PCI index for a domain.
+ * @param client  domain to allocate index for
+ * @return        allocated index, or 0 on failure
+ */
+static uint32_t domain_allocate_pci_index(struct domain_info *domain) {
+    // Keep incrementing index_last until we have a free index
+    for (;;) {
+        // Handle overflow, skipping over 0 (reserved)
+        if (domain->index_last == 0xFFFFFFFF)
+            domain->index_last = 0;
+
+        domain->index_last++;
+        if (!vec_u32_contains(&domain->indices, domain->index_last, NULL)) {
+            vec_u32_push_back(&domain->indices, domain->index_last);
+            return domain->index_last;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Free a previously allocated PCI index.
+ * @param client     domain that index was allocated for
+ * @param index index to free
+ */
+static void domain_free_pci_index(struct domain_info *domain, uint32_t index) {
+    for (size_t i=0; i<domain->indices.count; i++) {
+        if (domain->indices.data[i] == index) {
+            domain->index_last = i - 1;
+            vec_u32_remove(&domain->indices, i);
+            return;
+        }
+    }
+
+    log_BUG("Tried to free PCI index that wasn't allocated!\n");
 }
 
 static void print_running_domains(virConnectPtr conn) {
@@ -186,8 +251,10 @@ out:
  * @param index  index of the new ivshmem device for the domain. Must be unique.
  * @return success?
  */
-static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index) {
+static bool attach_ivshmem_device(virDomainPtr dom, const char *path, uint32_t index) {
     char *result;
+
+    log(LOGL_INFO, "About to attach ivshmem device at %s, index %"PRIu32, path, index);
 
 #ifdef USE_VFIO_NOIOMMU
     /**
@@ -198,12 +265,12 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
 
     // A QMP command to add a new chardev with formats %d %s (index, path)
     const char qmp_new_chardev_format[] = "{\"execute\":\"chardev-add\", \"arguments\": {\"id\":"
-        "\"charshmem%d\", \"backend\":{ \"type\": \"socket\", \"data\": "
+        "\"charshmem%d"PRIu32"\", \"backend\":{ \"type\": \"socket\", \"data\": "
         "{\"server\": false, \"addr\": {\"type\": \"unix\", \"data\": {\"path\": \"%s\"} } } } } }";
 
     // A QMP command to add a new ivshmem device with format %d (index)
     const char qmp_new_ivshmem_format[] = "{\"execute\":\"device_add\", \"arguments\": {\"driver\": "
-        "\"ivshmem-doorbell\", \"id\":\"shmem%1$d\", \"chardev\":\"charshmem%1$d\", \"vectors\": 2}}";
+        "\"ivshmem-doorbell\", \"id\":\"shmem%1$"PRIu32"\", \"chardev\":\"charshmem%1$"PRIu32"\", \"vectors\": 2}}";
 
     // Fill in arguments for chardev and ivshmem commands
     char chardev_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
@@ -279,6 +346,29 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, int index)
 
 }
 
+/**
+ * Attach an ivshmem device to the given domain ID.
+ */
+bool attach_ivshmem_by_id(uint32_t id) {
+    // Lookup domain by ID
+    struct domain_info *info = NULL;
+    if (!get_info_by_domain_id(id, &info))
+        return false;
+
+    virDomainPtr dom = virDomainLookupByUUIDString(conn, info->uuid_str);
+    if (!dom)
+        return false;
+
+    // Allocate PCI index and attach device
+    uint32_t index = domain_allocate_pci_index(info);
+    if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, index)) {
+        domain_free_pci_index(info, index);
+        return false;
+    }
+
+    return true;
+}
+
 #if 0
 static bool spawn_kvmchan_listener(virDomainPtr dom) {
     // Dump the VM configuration and check for the appropriate ivshmem devices
@@ -345,29 +435,27 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
                 free(info);
                 break;
             }
-            log(LOGL_INFO, "Got PID: %d", info->pid);
+
+            info->index_last = 0;
+            if (!vec_u32_init(&info->indices, 10, NULL)) {
+                log(LOGL_WARN, "Failed to init indices vec for domain! Ignoring...");
+                free(info);
+                break;
+            }
 
             // Create a new ivshmem device on the guest
             // that will be used for guest<->kvmchand communication
             if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, 0)) {
                 log(LOGL_WARN, "Failed to attach ivshmem device! Ignoring...");
+                vec_u32_destroy(&info->indices);
                 free(info);
                 break;
             }
 
             // Add VM to list of running domains
-            sem_wait(&running_domains_sem);
+            ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
             vec_voidp_push_back(&running_domains, info);
-            sem_post(&running_domains_sem);
-
-            // Inform main loop of the new VM
-            /*
-            struct libvirt_event ev = { .type = LVE_TYPE_STARTED };
-            if (write(main_soc, &ev, sizeof(ev)) < 0) {
-                log(LOGL_WARN, "Failed to send event to main process!");
-                bail_out();
-            }
-            */
+            ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
 
             break;
         case VIR_DOMAIN_EVENT_STOPPED:
@@ -428,17 +516,40 @@ static void handle_ipc_message(struct ipc_message *msg) {
     struct ipc_cmd *cmd = &msg->cmd;
     struct ipc_message response = {
         .type = IPC_TYPE_RESP,
+        .resp.error = true,
         .dest = msg->src,
         .fd = -1,
         .id = msg->id
     };
 
     switch(cmd->command) {
-        case LIBVIRT_IPC_CMD_GET_PID_BY_ID: {
+        case LIBVIRT_IPC_CMD_GET_PID_BY_ID:
+        {
             int pid = -1;
-            response.resp.error = get_pid_by_domain_id((uint32_t)cmd->args[0],
-                                                       &pid);
+            response.resp.error = !get_pid_by_domain_id((uint32_t)cmd->args[0],
+                                                        &pid);
             response.resp.ret = (pid_t)pid;
+            break;
+        }
+
+        case LIBVIRT_IPC_CMD_ATTACH_IVSHMEM:
+        {
+            bool errors[2] = {false};
+
+            // We were passed up to 2 domains
+            for (uint8_t i=0; i<2; i++) {
+                // Skip -1
+                if (cmd->args[i] == -1)
+                    continue;
+
+                if (!attach_ivshmem_by_id((uint32_t)cmd->args[i]))
+                    errors[i] = true;
+            }
+
+            // TODO: if one fails, the other should likely be undone
+            response.resp.error = errors[0] || errors[1];
+            response.resp.ret = (!!errors[1] << 1) | !!errors[0];
+
             break;
         }
 
@@ -530,6 +641,13 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
 
             if (!find_qemu_process_pid(info->uuid_str, &info->pid)) {
                 log(LOGL_WARN, "Failed to lookup domain PID!");
+                free(domains);
+                goto error;
+            }
+
+            info->index_last = 0;
+            if (!vec_u32_init(&info->indices, 10, NULL)) {
+                log(LOGL_WARN, "Failed to init indices vec for domain!");
                 free(domains);
                 goto error;
             }

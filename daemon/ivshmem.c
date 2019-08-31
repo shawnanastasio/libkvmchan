@@ -19,7 +19,7 @@
 
 /**
  * This file contains an implementation of an ivshmem server.
- * It is used to manage the shared file memory regions and
+ * It is used to manage the shared memory regions and
  * interrupt eventfds allocated to VMs.
  *
  * For more information, see:
@@ -30,6 +30,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include <unistd.h>
 #include <endian.h>
@@ -48,6 +49,7 @@
 #include "ivshmem.h"
 #include "libkvmchan-priv.h"
 #include "ipc.h"
+#include "config.h"
 
 struct ringbuf_conn_data {
     ringbuf_t host_to_client_rb;
@@ -62,15 +64,23 @@ struct conn_info {
     int incoming_eventfds[NUM_EVENTFDS]; // eventfds used by client to notify us
     int outgoing_eventfds[NUM_EVENTFDS]; // eventfds used by us to notify client
 
-    // Ringbuffer structures and
+    // Ringbuffer structures and mapped shared memory
     struct ringbuf_conn_data data;
 };
 
+struct pending_conn {
+    int shmfd;
+    uint32_t ivposition;
+};
+
 struct client_info {
-    pid_t pid; // PID of qemu process
-    pthread_t listener; // Listener thread handle
-    int listener_eventfd; // Eventfd to kill the listener thread
+    pid_t pid;                    // PID of qemu process
+    pthread_t listener;           // Listener thread handle
+    int listener_eventfd;         // Eventfd to kill the listener thread
     struct vec_voidp connections; // conn_info vec
+    struct vec_voidp pending;     // pending_conn vec
+    struct vec_u32 ivpositions;   // Reserved ivpositions
+    uint32_t ivposition_last;     // Last allocated ivposition
 };
 
 struct ivshmem_server {
@@ -78,6 +88,15 @@ struct ivshmem_server {
     struct vec_voidp clients; // client_info vec
 };
 
+struct ivshmem_server g_server;
+
+/**
+ * Send an ivshmem protocol message to a given socket.
+ * @param socfd socket to send message to
+ * @param msg   message to send
+ * @param fd    file descriptor to pass via SCM_RIGHTS, or -1
+ * @return      number of bytes sent, or -1 on failure.
+ */
 static ssize_t send_ivshmem_msg(int socfd, int64_t msg, int fd) {
     union {
         char cmsgbuf[CMSG_SPACE(sizeof(int))];
@@ -123,6 +142,8 @@ static void conn_info_destructor(void *conn_) {
 static void client_info_destructor(void *client_) {
     struct client_info *client = client_;
     vec_voidp_destroy(&client->connections);
+    vec_voidp_destroy(&client->pending);
+    vec_u32_destroy(&client->ivpositions);
 
     // Kill the listener thread
     uint64_t buf = 1;
@@ -138,8 +159,16 @@ static void cleanup_socket_path(void *path_) {
     unlink(path);
 }
 
+/**
+ * Get a client that's connected to the given ivshmem server.
+ * @param server       ivshmem server to act on
+ * @param pid          PID of client to search for
+ * @param makenew      whether to make a new client if one with the given PID is not found
+ * @param[out] idx_out index of the client in the server's clients vec
+ * @return             client_info, or NULL if not found and makenew=false
+ */
 static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, bool makenew,
-                                        size_t *idx_out) {
+                                      size_t *idx_out) {
     for(size_t i=0; i<server->clients.count; i++) {
         struct client_info *cur = server->clients.data[i];
         if (cur->pid == pid) {
@@ -149,25 +178,80 @@ static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, 
         }
     }
     if (!makenew)
-        return NULL;
+        goto fail;
 
     // No matches found, make a new one
     struct client_info *new = malloc_w(sizeof(struct client_info));
-    if (!vec_voidp_init(&new->connections, 10, conn_info_destructor)) {
-        free(new);
-        return NULL;
-    }
+    if (!vec_voidp_init(&new->connections, 10, conn_info_destructor))
+        goto fail_new;
     new->pid = pid;
 
+    // Initialize pending vec
+    if (!vec_voidp_init(&new->pending, 10, free_destructor))
+        goto fail_connections;
+
+    // Initalize ivpositions vec, ivposition_last
+    new->ivposition_last = KVMCHAND_IVPOSITION;
+    if (!vec_u32_init(&new->ivpositions, 10, NULL))
+        goto fail_pending;
+
     // Insert into vec and return
-    if (!vec_voidp_push_back(&server->clients, new)) {
-        free(new);
-        return NULL;
-    }
+    if (!vec_voidp_push_back(&server->clients, new))
+        goto fail_ivpositions;
 
     if (idx_out)
         *idx_out = server->clients.count - 1;
     return new;
+
+fail_ivpositions:
+    vec_u32_destroy(&new->ivpositions);
+fail_pending:
+    vec_voidp_destroy(&new->pending);
+fail_connections:
+    vec_voidp_destroy(&new->connections);
+fail_new:
+    free(new);
+fail:
+    return NULL;
+}
+
+/**
+ * Allocate an ivposition for a client.
+ * @param client  client to allocate ivposition for
+ * @return        allocated ivposition, or 0 on failure
+ */
+static uint32_t client_allocate_ivposition(struct client_info *client) {
+    // Keep incrementing ivposition_last until we have a free ivposition
+    for (;;) {
+        // Handle overflow, skipping over 0 and 1 (reserved)
+        if (client->ivposition_last == 0xFFFFFFFF)
+            client->ivposition_last = 1;
+
+        client->ivposition_last++;
+        if (!vec_u32_contains(&client->ivpositions, client->ivposition_last, NULL)) {
+            vec_u32_push_back(&client->ivpositions, client->ivposition_last);
+            return client->ivposition_last;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Free a previously allocated ivposition.
+ * @param client     client that ivposition was allocated for
+ * @param ivposition ivposition to free
+ */
+static void client_free_ivposition(struct client_info *client, uint32_t ivposition) {
+    for (size_t i=0; i<client->ivpositions.count; i++) {
+        if (client->ivpositions.data[i] == ivposition) {
+            client->ivposition_last = i - 1;
+            vec_u32_remove(&client->ivpositions, i);
+            return;
+        }
+    }
+
+    log_BUG("Tried to free ivposition that wasn't allocated!\n");
 }
 
 static bool handle_kvmchand_message(struct conn_info *conn) {
@@ -271,7 +355,7 @@ fail:
  * Spawn a thread to handle kvmchand messages from a given client
  * @param server ivshmem server
  * @param conn   conn_info for client to handle
- * @return success?
+ * @return       success?
  */
 static bool spawn_conn_listener_thread(struct client_info *client) {
 
@@ -285,30 +369,44 @@ static bool spawn_conn_listener_thread(struct client_info *client) {
     return true;
 }
 
-static int do_init_sequence(struct ivshmem_server *server, int fd) {
+static bool do_init_sequence(struct ivshmem_server *server, int fd) {
+    struct conn_info *conn = NULL;
+    struct client_info *info = NULL;
+
     // Obtain the PID of the client
     socklen_t len = sizeof(struct ucred);
     struct ucred cred;
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
-        return -1;
+        goto fail;
 
     log(LOGL_INFO, "Got connection from PID: %u", cred.pid);
 
     // Obtain client info
-    struct client_info *info = get_client(server, cred.pid, true, NULL);
+    info = get_client(server, cred.pid, true, NULL);
     if (!info)
-        return -1;
+        goto fail;
 
     // ID that corresponds to the IVPosition register.
     // For the first connection, id is always 1.
-    int64_t id;
+    int32_t id;
 
     // Create an entry for this connection in the client_info
-    struct conn_info *conn = malloc_w(sizeof(struct conn_info));
+    conn = malloc_w(sizeof(struct conn_info));
     conn->socfd = -1; conn->shmfd = -1;
     int eventfds[NUM_EVENTFDS * 2];
     for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
         eventfds[i] = -1; // Initialize to -1 to make cleanup easier
+
+    // Allocate eventfds
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+        if ((eventfds[i] = eventfd(0, 0)) < 0)
+            goto fail;
+
+        if (i < NUM_EVENTFDS)
+            conn->incoming_eventfds[i] = eventfds[i];
+        else
+            conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
+    }
 
     bool first_conn = false;
     if (info->connections.count == 0) {
@@ -316,70 +414,74 @@ static int do_init_sequence(struct ivshmem_server *server, int fd) {
 
         // The first connection is for communicating with this daemon
         if ((conn->shmfd = memfd_create("kvmchand_shm", 0)) < 0)
-            goto fail_malloc_conn;
+            goto fail;
         if (ftruncate(conn->shmfd, DAEMON_SHM_SIZE) < 0)
-            goto fail_malloc_conn;
-
-        // Allocate eventfds
-        for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
-            if ((eventfds[i] = eventfd(0, 0)) < 0)
-                goto fail_malloc_conn;
-
-            if (i < NUM_EVENTFDS)
-                conn->incoming_eventfds[i] = eventfds[i];
-            else
-                conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
-        }
+            goto fail;
 
         // Set IVPosition to 1
         id = 1;
     } else {
-        // TODO
-        log(LOGL_ERROR, "Unimplemented!");
-        goto fail_malloc_conn;
+        // Grab the first entry in the pending connections vector and use
+        // the data it contains to initalize this connection.
+        if (info->pending.count == 0) {
+            log(LOGL_ERROR, "Unexpected connection from QEMU on pid %u (no pending).", cred.pid);
+            goto fail;
+        }
+
+        struct pending_conn *p = info->pending.data[0];
+        conn->shmfd = p->shmfd;
+        id = p->ivposition;
+
+        vec_voidp_remove(&info->pending, 0);
     }
     conn->socfd = fd;
 
     if (!vec_voidp_push_back(&info->connections, conn))
-        goto fail_malloc_conn;
+        goto fail;
 
     // Send information to client
     if (send_ivshmem_msg(fd, 0, -1) < 0) // Protocol version (0)
-        goto fail_malloc_conn;
+        goto fail;
 
     if (send_ivshmem_msg(fd, id, -1) < 0) // Domain ID
-        goto fail_malloc_conn;
+        goto fail;
 
     if (send_ivshmem_msg(fd, -1, conn->shmfd) < 0) // shm fd
-        goto fail_malloc_conn;
+        goto fail;
 
     for (size_t i=0; i<NUM_EVENTFDS; i++) {
         if (send_ivshmem_msg(fd, 0, conn->incoming_eventfds[i]) < 0) // peer eventfds (always id=0)
-            goto fail_malloc_conn;
+            goto fail;
     }
 
     for (size_t i=0; i<NUM_EVENTFDS; i++) {
         if (send_ivshmem_msg(fd, id, conn->outgoing_eventfds[i]) < 0) // outgoing eventfds
-            goto fail_malloc_conn;
+            goto fail;
     }
 
     // If this is the first connection for the client,
     // spawn a listener thread
     if (first_conn && !spawn_conn_listener_thread(info))
-        goto fail_malloc_conn;
+        goto fail;
 
-    return 0;
+    return true;
 
-fail_malloc_conn:
-    if (conn->socfd >= 0) close(conn->socfd);
-    if (conn->shmfd >= 0) close(conn->shmfd);
-    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
-        if (eventfds[i] > 0)
-            close(eventfds[i]);
+fail:
+    if (conn) {
+        if (conn->socfd >= 0) close(conn->socfd);
+        if (conn->shmfd >= 0) close(conn->shmfd);
+        for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
+            if (eventfds[i] > 0)
+                close(eventfds[i]);
 
-    free(conn);
+        free(conn);
+    }
 
-    return -1;
+    // Only free info if it was created by us (and therefore has 0 connections)
+    if (info && info->connections.count == 0)
+        conn_info_destructor(info);
+
+    return false;
 }
 
 static bool remove_connection(struct ivshmem_server *server, int fd) {
@@ -417,10 +519,75 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
 }
 
 /**
+ * Register an upcomming connection from a QEMU process.
+ * @param server server instance to register on
+ * @param pid    PID of QEMU process that will connect
+ * @param shmfd  fd to shared memory
+ * @return       newly allocated ivposition, or 0 on failure
+ */
+static uint32_t register_conn(struct ivshmem_server *server, pid_t pid, int shmfd) {
+    struct client_info *client = get_client(server, pid, false, NULL);
+    if (!client)
+        goto fail;
+
+    struct pending_conn *pending = malloc_w(sizeof(struct pending_conn));
+    pending->shmfd = shmfd;
+    pending->ivposition = client_allocate_ivposition(client);
+    if (pending->ivposition == 0)
+        goto fail_pending;
+
+    if (!vec_voidp_push_back(&client->pending, pending))
+        goto fail_ivposition;
+
+    return pending->ivposition;
+
+fail_ivposition:
+    client_free_ivposition(client, pending->ivposition);
+fail_pending:
+    free(pending);
+fail:
+    return 0;
+}
+
+/**
  * Handle IPC messages from other kvmchand processes
  */
 static void handle_ipc_message(struct ipc_message *msg) {
+    struct ipc_cmd *cmd = &msg->cmd;
+    struct ipc_message response = {
+        .type = IPC_TYPE_RESP,
+        .resp.error = true,
+        .dest = msg->src,
+        .fd = -1,
+        .id = msg->id
+    };
 
+    switch(cmd->command) {
+        case IVSHMEM_IPC_CMD_REGISTER_CONN:
+        {
+            // Register up to two pending connections
+            uint32_t ivpositions[2] = {0};
+            int shmfd = msg->fd;
+            for (uint8_t i=0; i<2; i++) {
+                pid_t pid = cmd->args[i];
+                if (pid)
+                    ivpositions[i] = register_conn(&g_server, pid, shmfd);
+            }
+
+            response.resp.ret = ((uint64_t)ivpositions[0] << 32) | ivpositions[1];
+            response.resp.error = (response.resp.ret == 0);
+
+            break;
+        }
+
+        default:
+            log_BUG("Unknown IPC command received in ivshmem loop: %"PRIu64, cmd->command);
+    }
+
+    if (msg->flags & IPC_FLAG_WANTRESP) {
+        if (!ipc_send_message(&response, NULL))
+            log_BUG("Unable to send response to IPC message!");
+    }
 }
 
 void run_ivshmem_loop(int mainsoc) {
@@ -457,8 +624,8 @@ void run_ivshmem_loop(int mainsoc) {
         goto error;
 
     // Initialize ivshmem_server
-    struct ivshmem_server server = { .socfd = socfd };
-    if (!vec_voidp_init(&server.clients, 10, client_info_destructor))
+    g_server.socfd = socfd;
+    if (!vec_voidp_init(&g_server.clients, 10, client_info_destructor))
         goto error;
 
     // Poll for events
@@ -472,7 +639,7 @@ void run_ivshmem_loop(int mainsoc) {
                 // Connection request on the socket, accept it
                 int fd = accept(socfd, NULL, NULL);
 
-                if (do_init_sequence(&server, fd) < 0) {
+                if (!do_init_sequence(&g_server, fd)) {
                     log(LOGL_WARN, "Couldn't do init sequence with client on fd %d: %m", fd);
                     continue;
                 }
@@ -490,7 +657,6 @@ void run_ivshmem_loop(int mainsoc) {
                 if (n != 0) {
                     log(LOGL_ERROR, "Received unknown message from client on fd %d", fd);
                     continue;
-                    //goto error;
                 }
 
                 // Client disconnected
@@ -501,7 +667,7 @@ void run_ivshmem_loop(int mainsoc) {
                 }
 
                 // Remove connection
-                if (!remove_connection(&server, fd)) {
+                if (!remove_connection(&g_server, fd)) {
                     log(LOGL_ERROR, "Failed to remove connection data!");
                     goto error;
                 }

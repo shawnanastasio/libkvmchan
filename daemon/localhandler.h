@@ -17,33 +17,9 @@
  * along with libkvmchan.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KVMCHAND_CONNECTIONS_H
-#define KVMCHAND_CONNECTIONS_H
+#ifndef KVMCHAND_LOCALHANDLER_H
+#define KVMCHAND_LOCALHANDLER_H
 
-#include <stdbool.h>
-#include <stdint.h>
+void run_localhandler_loop(int mainsoc);
 
-#include <sys/types.h>
-
-#include "util.h"
-
-struct peer {
-    uint32_t dom;        // Domain ID
-    pid_t pid;           // PID of QEMU if remote, or -1
-    uint32_t ivposition; // IVPosition if remote, or 0
-};
-
-struct connection {
-    struct peer server;
-    struct peer client;
-    uint32_t port;
-
-    // memfd backing shared memory region
-    int memfd;
-};
-
-bool connections_init(void);
-bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
-                uint64_t read_min, uint64_t write_min, uint32_t *server_ivpos_out);
-
-#endif //KVMCHAND_CONNECTIONS_H
+#endif // KVMCHAND_LOCALHANDLER_H

@@ -21,6 +21,7 @@
 #define LIBKVMCHAN_PRIV_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include <ringbuf.h>
 
@@ -36,7 +37,8 @@
 
 /* client<->kvmchand API */
 
-#define KVMCHAND_API_VERSION 1
+#define KVMCHAND_API_VERSION  1
+#define KVMCHAND_MSG_NUM_ARGS 4
 
 /**
  * A message sent from a client (API consumer) to kvmchand.
@@ -46,20 +48,19 @@ struct kvmchand_message {
 
     /**
      * Confirm client<->kvmchand communication works.
-     * arg0 (u64) - API version number supported by client
      *
-     * ret  (i64) - API version number supported by host
+     * ret - (i64) API version number supported by host
      */
 #define KVMCHAND_CMD_HELLO      0
 
     /**
      * Create a new vchan.
-     * arg0 (int) - domain # of client
-     * arg1 (int) - port
-     * arg2 (u64) - read_min
-     * arg3 (u64) - write_min
+     * args[0] - (u32) domain # of client
+     * args[1] - (u32) port
+     * args[2] - (u64) read_min
+     * args[3] - (u64) write_min
      *
-     * ret (i64) - -1 on fail, else index of ivshmem device for new vchan
+     * ret - (u32) The IVPosition of the new ivshmem device, or 0 if called from dom0.
      */
 #define KVMCHAND_CMD_SERVERINIT 1
 
@@ -68,11 +69,11 @@ struct kvmchand_message {
      * arg0 (int) - domain # of server
      * arg1 (int) - port
      *
-     * ret (i64) - -1 on fail, else index of ivshmem device for vchan
+     * ret - TBD
      */
 #define KVMCHAND_CMD_CLIENTINIT 2
 
-    uint64_t args[4];
+    int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
 
 /**
@@ -80,6 +81,7 @@ struct kvmchand_message {
  */
 struct kvmchand_ret {
     int64_t ret;
+    bool error;
 };
 
 /**
