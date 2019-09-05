@@ -317,10 +317,8 @@ static void *conn_listener_thread(void *client_) {
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0)
         goto fail;
-    for (size_t i=0; i<NUM_EVENTFDS; i++) {
-        if (add_epoll_fd(epoll_fd, conn->incoming_eventfds[i], EPOLLIN) < 0)
-            goto fail_epoll_create;
-    }
+    if (add_epoll_fd(epoll_fd, conn->incoming_eventfds[1], EPOLLIN) < 0)
+        goto fail_epoll_create;
     if (add_epoll_fd(epoll_fd, client->listener_eventfd, EPOLLIN) < 0)
         goto fail_epoll_create;
 
@@ -340,6 +338,10 @@ static void *conn_listener_thread(void *client_) {
                 log(LOGL_ERROR, "Couldn't handle message from client! Continuing...");
                 continue;
             }
+
+            // Flush eventfd
+            uint64_t buf;
+            ignore_value(read(cur_fd, &buf, 8));
         }
     }
 
