@@ -45,6 +45,8 @@ struct localhandler_data {
     struct vec_int clients;
 };
 
+bool g_is_dom0;
+
 static void cleanup_socket_path(void *path_) {
     const char *path = path_;
     unlink(path);
@@ -57,12 +59,35 @@ static void handle_ipc_message(struct ipc_message *msg) {
 
 }
 
-/*
- * Get local domain number
+/**
+ * Forward messages to dom 0 over VFIO
  */
-static uint32_t get_local_domain_no(void) {
-    // TODO: don't always assume host
-    return 0;
+static bool defer_client_message(struct kvmchand_message *msg, struct kvmchand_ret *ret) {
+    // Pack the request into an IPC message and send to VFIO
+    struct ipc_message ipc_resp, ipc_msg = {
+        .type = IPC_TYPE_CMD,
+        .cmd = {
+            .command = VFIO_CMD_FORWARD_KVMCHAND_MSG,
+            .args = {
+                msg->command,
+                msg->args[0],
+                msg->args[1],
+                msg->args[2],
+                msg->args[3],
+            },
+        },
+        .dest = IPC_DEST_VFIO,
+        .flags = IPC_FLAG_WANTRESP
+    };
+
+    if (!ipc_send_message(&ipc_msg, &ipc_resp)) {
+        log(LOGL_ERROR, "Unable to send IPC message to VFIO: %m.");
+        return false;
+    }
+
+    ret->ret = ipc_resp.resp.ret;
+    ret->error = ipc_resp.resp.error;
+    return true;
 }
 
 /**
@@ -70,6 +95,16 @@ static uint32_t get_local_domain_no(void) {
  */
 static bool handle_client_message(int fd, struct kvmchand_message *msg) {
     struct kvmchand_ret ret = { .error = true };
+
+    /**
+     * If we're not in dom 0, the only way we can meaningfully service
+     * requests is to defer them to the kvmchand server on dom0.
+     */
+    if (!g_is_dom0) {
+        if (!defer_client_message(msg, &ret))
+            goto error;
+        goto out;
+    }
 
     switch(msg->command) {
         case KVMCHAND_CMD_HELLO:
@@ -85,7 +120,7 @@ static bool handle_client_message(int fd, struct kvmchand_message *msg) {
                 .cmd = {
                     .command = MAIN_IPC_CMD_VCHAN_INIT,
                     .args = {
-                        get_local_domain_no(),
+                        0,
                         msg->args[0],
                         msg->args[1],
                         msg->args[2],
@@ -112,6 +147,7 @@ static bool handle_client_message(int fd, struct kvmchand_message *msg) {
             log(LOGL_WARN, "Warning, unknown command from client fd %d. Ignoring.", fd);
     }
 
+out:
     if (socmsg_send(fd, &ret, sizeof(ret), -1) < 0) {
         log(LOGL_ERROR, "Failed to send response to client fd %d.", fd);
         return false;
@@ -145,8 +181,9 @@ static bool remove_connection(struct localhandler_data *data, int fd) {
     return false;
 }
 
-void run_localhandler_loop(int mainsoc) {
+void run_localhandler_loop(int mainsoc, bool is_dom0) {
     struct localhandler_data data;
+    g_is_dom0 = is_dom0;
 
     if (!ipc_start(mainsoc, IPC_DEST_LOCALHANDLER, handle_ipc_message))
         goto error;

@@ -321,7 +321,7 @@ static void host_main(void) {
         // Close unused socketpair fds
         close(main_localhandler_sv[0]);
 
-        run_localhandler_loop(main_localhandler_sv[1]);
+        run_localhandler_loop(main_localhandler_sv[1], true);
 
         // NOTREACHED
         bail_out();
@@ -355,12 +355,14 @@ fail_errno:
 // Entry point for daemon when run in guest mode
 static void guest_main(void) {
     // Create socketpairs for IPC
-    int main_vfio_sv[2];
+    int main_vfio_sv[2], main_localhandler_sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_vfio_sv) < 0)
+        goto fail_errno;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_localhandler_sv) < 0)
         goto fail_errno;
 
     // Spawn VFIO process
-    pid_t vfio;
+    pid_t vfio, localhandler;
     if ((vfio = fork()) < 0) {
         goto fail_errno;
     } else if (vfio == 0) {
@@ -376,12 +378,33 @@ static void guest_main(void) {
         bail_out();
     }
 
+    // Spawn localhandler process
+    if ((localhandler = fork()) < 0) {
+        goto fail_errno;
+    } else if (localhandler == 0) {
+        // Get notified when parent exits
+        prctl(PR_SET_PDEATHSIG, SIGHUP);
+
+        // Close unused socketpair fds
+        close(main_localhandler_sv[0]);
+
+        run_localhandler_loop(main_localhandler_sv[1], false);
+
+        // NOTREACHED
+        bail_out();
+    }
+
+    // Close unused fds
+    close(main_vfio_sv[1]);
+    close(main_localhandler_sv[1]);
+
     // listen for messages
     int sockets[NUM_IPC_SOCKETS];
     for (uint8_t i=0; i<NUM_IPC_SOCKETS; i++)
         sockets[i] = -1;
 
     sockets[IPC_SOCKET_VFIO] = main_vfio_sv[0];
+    sockets[IPC_SOCKET_LOCALHANDLER] = main_localhandler_sv[0];
 
     ipc_server_start(sockets, IPC_DEST_MAIN, handle_message);
 

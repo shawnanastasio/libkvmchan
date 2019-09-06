@@ -67,6 +67,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <inttypes.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -80,6 +81,7 @@
 #include <linux/vfio.h>
 
 #include "util.h"
+#include "ipc.h"
 #include "ringbuf.h"
 #include "config.h"
 #include "libkvmchan-priv.h"
@@ -90,7 +92,7 @@
 #if (defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)) && \
     defined(__powerpc64__)
 // Due to a bug in QEMU, ivshmem BAR 0 values are always Big Endian on powerpc64,
-// even when both the host an guest are in Little Endian mode (ppc64le).
+// even when both the host and guest are in Little Endian mode (ppc64le).
 // Work around this by byte swapping the values.
 //
 // https://bugs.launchpad.net/qemu/+bug/1824744
@@ -131,7 +133,7 @@ struct vfio_device_fd {
 
 struct vfio_connection {
     int device_fd;
-    struct ivshmem_bar0 *bar0;
+    volatile struct ivshmem_bar0 *bar0;
     void *shared;
     size_t shared_size;
 
@@ -158,6 +160,8 @@ struct vfio_data {
     struct vec_voidp device_fds;
     struct vfio_connection host_conn;
 };
+
+struct vfio_data *g_vfio_data = NULL;
 
 static void vfio_conn_free_eventfds(struct vfio_connection *conn);
 
@@ -312,6 +316,7 @@ static bool validate_vfio_configuration(struct vec_voidp *ivshmem_devices,
         log(LOGL_ERROR, "vfio-pci is not loaded!\n"
                 " Make sure your kernel was built with CONFIG_VFIO_PCI\n"
                 " and run `modprobe vfio-pci`.");
+        return false;
     }
     close(fd);
 
@@ -513,15 +518,12 @@ fail_malloc_dev_fd:
  * Notify peer 0 at the specified interrupt vector
  *
  * @param conn   vfio_connection to notify over
- * @param vecotr interrupt vector number to notify
- * @return success?
+ * @param vector interrupt vector number to notify
  */
-static inline bool notify_doorbell(struct vfio_connection *conn, uint16_t vector) {
+static inline void notify_doorbell(struct vfio_connection *conn, uint16_t vector) {
     // See ivshmem_spec.txt for more information
-    conn->bar0->doorbell =
-        host_to_ivshmem32(((0 << 16) & 0xFFFF) | (vector & 0xFFFF));
-
-    return true;
+    conn->bar0->doorbell = host_to_ivshmem32(vector);
+        //host_to_ivshmem32(((0 << 16) & 0xFFFF) | (vector & 0xFFFF));
 }
 
 static void *outgoing_thread(void *conn_) {
@@ -551,7 +553,7 @@ static void *outgoing_thread(void *conn_) {
 
             // Exit if event is from the kill eventfd
             if (cur_fd == conn->outgoing_thread_kill)
-                goto fail_epoll_create;;
+                goto fail_epoll_create;
 
             // Get index of eventfd in outgoing_eventfds
             int idx = -1;
@@ -561,11 +563,10 @@ static void *outgoing_thread(void *conn_) {
                     break;
                 }
             }
+            ASSERT(idx >= 0);
 
             // Notify the doorbell corresponding to this vector
-            if (!notify_doorbell(conn, idx)) {
-                log(LOGL_ERROR, "Failed to send mailbox notification! Continuing...");
-            }
+            notify_doorbell(conn, idx);
         }
     }
 
@@ -581,34 +582,26 @@ fail:
  * Follows the command format in libkvmchan-priv.h.
  *
  * @param      conn     connection to use
- * @param      command  command to send
- * @param      args     command arguments
+ * @param      msg      message to send
  * @param[out] response remote kvmchand's response
  * @return     success?
  */
-static bool kvmchand_send_message(struct vfio_connection *conn, uint64_t command,
-                                  uint64_t args[4], int64_t *response) {
+static bool kvmchand_send_message(struct vfio_connection *conn, struct kvmchand_message *msg,
+                                  struct kvmchand_ret *response) {
     shmem_hdr_t *hdr = conn->shared;
 
-    // Construct message
-    struct kvmchand_message msg;
-    msg.command = command;
-    memcpy(msg.args, args, sizeof(uint64_t) * 4);
-
     if (RB_SUCCESS != ringbuf_sec_write(&conn->client_to_host_rb, &hdr->client_to_host_pub,
-                                        &msg, sizeof(struct kvmchand_message))) {
+                                        msg, sizeof(struct kvmchand_message))) {
         log(LOGL_ERROR, "Failed to send message to host kvmchand!");
         return false;
     }
 
-    struct kvmchand_ret ret;
     if (RB_SUCCESS != ringbuf_sec_read(&conn->host_to_client_rb, &hdr->host_to_client_pub,
-                                       &ret, sizeof(struct kvmchand_ret))) {
+                                       response, sizeof(struct kvmchand_ret))) {
         log(LOGL_ERROR, "Failed to receive response from host kvmchand!");
         return false;
     }
 
-    *response = ret.ret;
     return true;
 }
 
@@ -784,14 +777,17 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
     }
 
     // Send HELLO message to server and confirm response
-    uint64_t args[4] = {KVMCHAND_API_VERSION};
-    int64_t ret;
-    if (!kvmchand_send_message(conn, KVMCHAND_CMD_HELLO, args, &ret)) {
+    struct kvmchand_ret ret;
+    struct kvmchand_message msg = {
+        .command = KVMCHAND_CMD_HELLO,
+        .args = { KVMCHAND_API_VERSION },
+    };
+    if (!kvmchand_send_message(conn, &msg, &ret)) {
         log(LOGL_ERROR, "Failed to confirm connection to host kvmchand! Did it crash?");
         goto fail_get_eventfds;
     }
 
-    if (ret != KVMCHAND_API_VERSION) {
+    if (ret.ret != KVMCHAND_API_VERSION) {
         log(LOGL_ERROR, "Host kvmchand uses API version %llu but we're on %llu! Aborting.", ret,
             KVMCHAND_API_VERSION);
         goto fail_get_eventfds;
@@ -891,7 +887,66 @@ fail_container_open:
     return false;
 }
 
+/**
+ * Handle IPC messages from other kvmchand processes
+ */
+static void handle_ipc_message(struct ipc_message *msg) {
+    struct ipc_cmd *cmd = &msg->cmd;
+    struct ipc_message response = {
+        .type = IPC_TYPE_RESP,
+        .resp.error = true,
+        .dest = msg->src,
+        .fd = -1,
+        .id = msg->id
+    };
+
+    switch(cmd->command) {
+        case VFIO_CMD_FORWARD_KVMCHAND_MSG:
+        {
+            // Unpack command into a kvmchand_msg
+            struct kvmchand_message kmsg = {
+                .command = cmd->args[0],
+                .args = {
+                    cmd->args[1],
+                    cmd->args[2],
+                    cmd->args[3],
+                    cmd->args[4],
+                },
+            };
+
+            /**
+             * For now, just a message and block for the first response.
+             * We don't have the fancy multiplexing and message sequencing
+             * that the IPC system has, so only one thread can use the
+             * ivshmem communication channel at a time.
+             */
+            struct kvmchand_ret ret;
+            if (!kvmchand_send_message(&g_vfio_data->host_conn, &kmsg, &ret)) {
+                log(LOGL_WARN, "Failed to forward message to dom0 kvmchand!\n");
+                break;
+            }
+
+            response.resp.error = ret.error;
+            response.resp.ret = ret.ret;
+
+            break;
+        }
+
+        default:
+            log_BUG("Unknown IPC command received in ivshmem loop: %"PRIu64, cmd->command);
+    }
+
+    if (msg->flags & IPC_FLAG_WANTRESP) {
+        if (!ipc_send_message(&response, NULL))
+            log_BUG("Unable to send response to IPC message!");
+    }
+}
+
 void run_vfio_loop(int mainsoc) {
+    if (!ipc_start(mainsoc, IPC_DEST_VFIO, handle_ipc_message)) {
+        log(LOGL_ERROR, "Failed to start IPC threads: %m!");
+        return;
+    }
 
     // Enumerate all ivshmem devices
     struct vec_voidp ivshmem_devices;
@@ -943,32 +998,17 @@ void run_vfio_loop(int mainsoc) {
             bail_out();
         }
 
-        log(LOGL_WARN, "Succesfully bound ivshmem devices.");
+        log(LOGL_WARN, "Successfully bound ivshmem devices.");
     }
 
     // Initialize vfio
     struct vfio_data vfio;
     if (!vfio_init(&vfio, &ivshmem_devices, &group))
         goto error;
+    g_vfio_data = &vfio;
 
-    // Initialize epoll
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0)
-        goto error;
-    if (add_epoll_fd(epoll_fd, mainsoc, EPOLLIN) < 0)
-        goto error;
-
-    struct epoll_event events[5];
-    int event_count;
-    for (;;) {
-        event_count = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-        for (int i=0; i<event_count; i++) {
-            int cur_fd = events[i].data.fd;
-            if (cur_fd == mainsoc) {
-                log(LOGL_INFO, "Got message from main loop!");
-            }
-        }
-    }
+    // TODO: add a heartbeat check to ensure that the dom0 daemon is still running
+    for(;;) usleep(1000);
 
 error:
     log(LOGL_ERROR, "Vfio loop encountered fatal error: %m!");

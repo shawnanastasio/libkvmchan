@@ -107,6 +107,9 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     log(LOGL_INFO, "vchan_init called! server_dom: %u, client_dom: %u, port %u, read_min: %lu, write_min: %lu",
             server_dom, client_dom, port, read_min, write_min);
 
+    if (server_dom == client_dom)
+        goto fail;
+
     // Validate read/write ring sizes. Ring size is usable space + 1.
     if (read_min + 1 > MAX_RING_SIZE || write_min + 1 > MAX_RING_SIZE) {
         log(LOGL_WARN, "Rejecting new vchan: rings too big."
@@ -117,7 +120,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
     // Make sure that there isn't already a vchan on this server/port
     if (connections_get_by_server_dom(server_dom, port)) {
-        log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port "PRIu32, server_dom, port);
+        log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
     }
 

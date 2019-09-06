@@ -100,15 +100,24 @@ struct ipc_message {
 #define LIBVIRT_IPC_CMD_GET_PID_BY_ID 0
 
 /**
+ * Get domain ID from a given QEMU PID.
+ * args[0] - (pid_t) pid of QEMU process
+ *
+ * resp.error - domain not found?
+ * resp.ret - (u32) domain ID
+ */
+#define LIBVIRT_IPC_CMD_GET_ID_BY_PID 1
+
+/**
  * Attach a new ivshmem device to the given domain IDs.
  * args[0] - (u32) domain ID or -1
  * args[1] - (u32) domain ID or -1
  *
  * resp.ret - (u8) (!!error1 << 1) | !!error0
  */
-#define LIBVIRT_IPC_CMD_ATTACH_IVSHMEM 1
+#define LIBVIRT_IPC_CMD_ATTACH_IVSHMEM 2
 
-// ivshmem process commandsk
+// ivshmem process commands
 
 /**
  * Register a new upcomming connection with ivshmem.
@@ -125,6 +134,21 @@ struct ipc_message {
  * The lower 32 bits contain the IVPosition for the pid in args[1], or 0 if not provided.
  */
 #define IVSHMEM_IPC_CMD_REGISTER_CONN 0
+
+// VFIO process commands
+
+/**
+ * Forward a kvmchand_message to dom 0.
+ * args[0] - (u64) command
+ * args[1] - (i64) argument 0
+ * args[2] - (i64) argument 1
+ * args[3] - (i64) argument 2
+ * args[4] - (i64) argument 3
+ *
+ * resp.error - error?
+ * resp.ret - (i64) return value
+ */
+#define VFIO_CMD_FORWARD_KVMCHAND_MSG 0
 
 void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
                       void (*message_handler)(struct ipc_message *));

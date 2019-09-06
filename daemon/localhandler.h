@@ -20,6 +20,6 @@
 #ifndef KVMCHAND_LOCALHANDLER_H
 #define KVMCHAND_LOCALHANDLER_H
 
-void run_localhandler_loop(int mainsoc);
+void run_localhandler_loop(int mainsoc, bool is_dom0);
 
 #endif // KVMCHAND_LOCALHANDLER_H

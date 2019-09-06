@@ -75,6 +75,7 @@ struct pending_conn {
 
 struct client_info {
     pid_t pid;                    // PID of qemu process
+    uint32_t dom;                 // Domain number of client
     pthread_t listener;           // Listener thread handle
     int listener_eventfd;         // Eventfd to kill the listener thread
     struct vec_voidp connections; // conn_info vec
@@ -185,6 +186,7 @@ static struct client_info *get_client(struct ivshmem_server *server, pid_t pid, 
     if (!vec_voidp_init(&new->connections, 10, conn_info_destructor))
         goto fail_new;
     new->pid = pid;
+    new->dom = 0;
 
     // Initialize pending vec
     if (!vec_voidp_init(&new->pending, 10, free_destructor))
@@ -254,7 +256,39 @@ static void client_free_ivposition(struct client_info *client, uint32_t ivpositi
     log_BUG("Tried to free ivposition that wasn't allocated!\n");
 }
 
-static bool handle_kvmchand_message(struct conn_info *conn) {
+/**
+ * Get the domain number of a given client.
+ * @param client client to get domain of
+ * @return       domain number of client, or 0 on failure
+ */
+static uint32_t client_get_domain(struct client_info *client) {
+    if (client->dom != 0)
+        return client->dom;
+
+    // Ask libvirt for the client's domain number
+    struct ipc_message resp, msg = {
+        .type = IPC_TYPE_CMD,
+        .cmd = {
+            .command = LIBVIRT_IPC_CMD_GET_ID_BY_PID,
+            .args = { client->pid }
+        },
+        .dest = IPC_DEST_LIBVIRT,
+        .flags = IPC_FLAG_WANTRESP
+    };
+    if (!ipc_send_message(&msg, &resp))
+        goto fail;
+    if (resp.resp.error)
+        goto fail;
+    client->dom = resp.resp.ret;
+    return client->dom;
+
+fail:
+    log(LOGL_ERROR, "Failed to get domain number for client!\n");
+    return 0;
+}
+
+static bool handle_kvmchand_message(struct client_info *client, struct conn_info *conn) {
+    log(LOGL_INFO, "Received kvmchand message from guest!"); //sponge
     struct kvmchand_message msg;
     if (RB_SUCCESS != ringbuf_sec_read(&conn->data.client_to_host_rb, &conn->data.hdr->client_to_host_pub,
                                        &msg, sizeof(struct kvmchand_message))) {
@@ -263,14 +297,47 @@ static bool handle_kvmchand_message(struct conn_info *conn) {
     }
 
     // Handle command and send response
-    struct kvmchand_ret ret;
+    struct kvmchand_ret ret = { .error = true };
     switch(msg.command) {
         case KVMCHAND_CMD_HELLO:
             ret.ret = KVMCHAND_API_VERSION;
+            ret.error = false;
             break;
+
+        case KVMCHAND_CMD_SERVERINIT:
+        {
+            uint32_t dom = client_get_domain(client);
+            if (dom == 0)
+                break;
+
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_INIT,
+                    .args = {
+                        dom,
+                        msg.args[0],
+                        msg.args[1],
+                        msg.args[2],
+                        msg.args[3],
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+            ret.ret = ipc_resp.resp.ret;
+
+            break;
+        }
 
         default:
             /* unimplemented */
+            log(LOGL_INFO, "Unimplemented command received!");
             ret.ret = -1;
             break;
     }
@@ -334,7 +401,7 @@ static void *conn_listener_thread(void *client_) {
             if (cur_fd == client->listener_eventfd)
                 goto fail_epoll_create;
 
-            if (!handle_kvmchand_message(conn)) {
+            if (!handle_kvmchand_message(client, conn)) {
                 log(LOGL_ERROR, "Couldn't handle message from client! Continuing...");
                 continue;
             }

@@ -532,6 +532,15 @@ static void handle_ipc_message(struct ipc_message *msg) {
             break;
         }
 
+        case LIBVIRT_IPC_CMD_GET_ID_BY_PID:
+        {
+            uint32_t id = 0;
+            response.resp.error = !get_domain_id_by_pid((pid_t)cmd->args[0],
+                                                        &id);
+            response.resp.ret = (uint32_t)id;
+            break;
+        }
+
         case LIBVIRT_IPC_CMD_ATTACH_IVSHMEM:
         {
             bool errors[2] = {false};
@@ -542,8 +551,10 @@ static void handle_ipc_message(struct ipc_message *msg) {
                 if (cmd->args[i] == -1)
                     continue;
 
-                if (!attach_ivshmem_by_id((uint32_t)cmd->args[i]))
+                if (!attach_ivshmem_by_id((uint32_t)cmd->args[i])) {
+                    log(LOGL_ERROR, "Failed to attach ivshmem to id %d!", (uint32_t)cmd->args[i]);
                     errors[i] = true;
+                }
             }
 
             // TODO: if one fails, the other should likely be undone
