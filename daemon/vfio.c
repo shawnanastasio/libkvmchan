@@ -126,20 +126,10 @@ struct ivshmem_group {
     char name[4];
 };
 
-struct vfio_device_fd {
-    char name[12 /* len(0000:00:00.0) */ + 1];
-    int fd;
-};
-
 struct vfio_connection {
+    char name[12 /* len(0000:00:00.0) */ + 1];
     int device_fd;
     volatile struct ivshmem_bar0 *bar0;
-    void *shared;
-    size_t shared_size;
-
-    // ringbuffers
-    ringbuf_t host_to_client_rb;
-    ringbuf_t client_to_host_rb;
 
     // eventfd data
     int incoming_eventfds[NUM_EVENTFDS];
@@ -154,20 +144,45 @@ struct vfio_connection {
     int outgoing_thread_kill;
 };
 
+struct vfio_host_connection {
+    struct vfio_connection *conn;
+    void *shared;
+    size_t shared_size;
+
+    // ringbuffers
+    ringbuf_t host_to_client_rb;
+    ringbuf_t client_to_host_rb;
+};
+
 struct vfio_data {
     int container;
     int group;
-    struct vec_voidp device_fds;
-    struct vfio_connection host_conn;
+    struct vfio_host_connection host_conn;
+    struct vec_voidp connections;
 };
 
 struct vfio_data *g_vfio_data = NULL;
+struct vec_voidp *g_ivshmem_devices = NULL;
 
 static void vfio_conn_free_eventfds(struct vfio_connection *conn);
 
+static void print_ivshmem_devices(struct vec_voidp *devices) {
+    size_t i=0;
+
+    printf("{");
+    goto skip_comma;
+
+    for (; i<devices->count; i++) {
+        printf(", ");
+skip_comma:
+        printf("%s", (char *)devices->data[i]);
+    }
+    printf("}\n");
+}
+
 #if 0
 static void connection_destructor(void *conn_) {
-    struct vfio_connection *conn = conn_;
+    struct vfio_host_connection *conn = conn_;
 
     if (munmap(conn->bar0, sizeof(struct ivshmem_bar0)) < 0)
         goto fail;
@@ -410,10 +425,12 @@ static bool enumerate_ivshmem_devices(struct vec_voidp *devices, bool nodup) {
         if (cur->d_name[0] == '.')
             continue; // Skip hidden, ".", ".."
 
-        // If nodup=true, make sure the vec doesn't already have this device
-        for (size_t i=0; i<devices->count; i++) {
-            if (strncmp(devices->data[i], cur->d_name, strlen(cur->d_name)) == 0)
-                goto skip_device; // Already have this device, skip
+        // If nodup is true, make sure the vec doesn't already have this device
+        if (nodup) {
+            for (size_t i=0; i<devices->count; i++) {
+                if (strncmp(devices->data[i], cur->d_name, strlen(cur->d_name)) == 0)
+                    goto skip_device; // Already have this device, skip
+            }
         }
 
         // Check vendor ID
@@ -482,36 +499,14 @@ static bool enumerate_ivshmem_devices(struct vec_voidp *devices, bool nodup) {
 }
 
 static int vfio_get_device_fd(struct vfio_data *data, const char *device) {
-    // See if we already have an fd for this device
-    for(size_t i=0; i<data->device_fds.count; i++) {
-        struct vfio_device_fd *cur = data->device_fds.data[i];
-        if (!strncmp(device, cur->name, sizeof(cur->name) - 1)) {
-            // found
-            return cur->fd;
-        }
-    }
-
-    // Not cached, get a new fd
-    struct vfio_device_fd *dev_fd = malloc_w(sizeof(struct vfio_device_fd));
-    if ((dev_fd->fd = ioctl(data->group, VFIO_GROUP_GET_DEVICE_FD, device)) < 0) {
+    int fd;
+    if ((fd = ioctl(data->group, VFIO_GROUP_GET_DEVICE_FD, device)) < 0) {
         log(LOGL_ERROR, "Unable to obtain device fd for %s: %m!", device);
-        goto fail_malloc_dev_fd;
-    }
-    strncpy(dev_fd->name, device, sizeof(dev_fd->name) - 1);
-    dev_fd->name[sizeof(dev_fd->name) - 1] = '\0';
-
-    if (!vec_voidp_push_back(&data->device_fds, dev_fd)) {
-        log(LOGL_ERROR, "Failed to append device fd to vec: %m!");
-        goto fail_ioctl;
+        close(fd);
+        return -1;
     }
 
-    return dev_fd->fd;
-
-fail_ioctl:
-    close(dev_fd->fd);
-fail_malloc_dev_fd:
-    free(dev_fd);
-    return -1;
+    return fd;
 }
 
 /**
@@ -578,7 +573,7 @@ fail:
 }
 
 /**
- * Send a message to a remote kvmchand over a given vfio_connection.
+ * Send a message to a remote kvmchand over a given vfio_host_connection.
  * Follows the command format in libkvmchan-priv.h.
  *
  * @param      conn     connection to use
@@ -586,7 +581,7 @@ fail:
  * @param[out] response remote kvmchand's response
  * @return     success?
  */
-static bool kvmchand_send_message(struct vfio_connection *conn, struct kvmchand_message *msg,
+static bool kvmchand_send_message(struct vfio_host_connection *conn, struct kvmchand_message *msg,
                                   struct kvmchand_ret *response) {
     shmem_hdr_t *hdr = conn->shared;
 
@@ -687,40 +682,94 @@ static void vfio_conn_free_eventfds(struct vfio_connection *conn) {
         close(conn->outgoing_eventfds[i]);
 }
 
-static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivshmem_devices) {
-    int fd;
-    struct ivshmem_bar0 *bar0;
-    void *shared;
-    size_t shared_size;
-    bool found = false;
-
-    // Go through all ivshmem devices and find the host (IVPosition 1)
+static bool vfio_conn_vec_rebuild(struct vfio_data *data, struct vec_voidp *ivshmem_devices) {
     for (size_t i=0; i<ivshmem_devices->count; i++) {
-        char *cur = ivshmem_devices->data[i];
+        const char *device = ivshmem_devices->data[i];
 
-        fd = vfio_get_device_fd(data, cur);
-        if (fd < 0)
-            goto fail;
-
-        // Map BAR0 to check IVPosition
-        bar0 = mmap(NULL, sizeof(struct ivshmem_bar0), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (bar0 == (void *)-1)
-            goto fail;
-
-        if (ivshmem_to_host32(bar0->ivposition) == KVMCHAND_IVPOSITION) {
-            found = true;
-            break;
+        // Skip if a connection already exists for this device
+        bool exists = false;
+        for (size_t i=0; i<data->connections.count; i++) {
+            struct vfio_connection *conn = data->connections.data[i];
+            if (strncmp(conn->name, device, sizeof(conn->name) - 1) == 0) {
+                exists = true;
+                break;
+            }
         }
+        if (exists)
+            continue;
 
-        // This isn't the correct device, check the next one
-        munmap(bar0, sizeof(struct ivshmem_bar0));
+        // Create connection
+        struct vfio_connection *conn = malloc_w(sizeof(struct vfio_connection));
+
+        strncpy(conn->name, device, sizeof(conn->name) - 1);
+        conn->name[sizeof(conn->name) - 1] = '\0';
+
+        conn->device_fd = vfio_get_device_fd(data, device);
+        if (conn->device_fd < 0)
+            goto fail_conn;
+
+        conn->bar0 = mmap(NULL, sizeof(struct ivshmem_bar0), PROT_READ | PROT_WRITE, MAP_SHARED, conn->device_fd, 0);
+        if (conn->bar0 == (void *)-1)
+            goto fail_device_fd;
+
+        if (!vfio_conn_get_eventfds(conn))
+            goto fail_mmap_bar0;
+
+        // Insert into connection vec
+        if (!vec_voidp_push_back(&data->connections, conn))
+            goto fail_get_eventfds;
+
+        continue;
+
+    fail_get_eventfds:
+        vfio_conn_free_eventfds(conn);
+    fail_mmap_bar0:
+        munmap((void *)conn->bar0, sizeof(struct ivshmem_bar0));
+    fail_device_fd:
+        close(conn->device_fd);
+    fail_conn:
+        free(conn);
+        return false;
     }
 
-    // No match
-    if (!found) {
+    return true;
+}
+
+static struct vfio_connection *vfio_conn_find_by_ivposition(struct vfio_data *data,
+                                                            struct vec_voidp *ivshmem_devices, uint32_t ivposition) {
+    // Scan for any new ivshmem devices
+    if (!enumerate_ivshmem_devices(ivshmem_devices, true))
+        return false;
+
+    if (data->connections.count != ivshmem_devices->count) {
+        // Rebuild connection list
+        if (!vfio_conn_vec_rebuild(data, ivshmem_devices)) {
+            log(LOGL_ERROR, "Failed to rebuild vfio connection vec!");
+            return false;
+        }
+    }
+
+    // Go through all connections and find the given ivposition
+    for (size_t i=0; i<data->connections.count; i++) {
+        struct vfio_connection *conn = data->connections.data[i];
+        if (ivshmem_to_host32(conn->bar0->ivposition) == ivposition) {
+            return conn;
+        }
+    }
+
+    return NULL;
+}
+
+static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivshmem_devices) {
+    void *shared;
+    size_t shared_size;
+
+    struct vfio_connection *conn;
+    if (!(conn = vfio_conn_find_by_ivposition(data, ivshmem_devices, KVMCHAND_IVPOSITION))) {
         log(LOGL_ERROR, "Failed to establish connection to daemon!");
         return false;
     }
+    data->host_conn.conn = conn;
 
     /* Host ivshmem device found, initialize connection */
 
@@ -729,15 +778,15 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
         .argsz = sizeof(region),
         .index = VFIO_PCI_BAR2_REGION_INDEX
     };
-    if (ioctl(fd, VFIO_DEVICE_GET_REGION_INFO, &region) < 0) {
-        goto fail_mmap_bar0;
+    if (ioctl(conn->device_fd, VFIO_DEVICE_GET_REGION_INFO, &region) < 0) {
+        goto fail;
     }
 
     shared_size = region.size;
-    shared = mmap(NULL, shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+    shared = mmap(NULL, shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, conn->device_fd,
                   vfio_region_mmap_offset(VFIO_PCI_BAR2_REGION_INDEX));
     if (shared == (void *)-1) {
-        goto fail_mmap_bar0;
+        goto fail;
     }
 
     shmem_hdr_t *hdr = shared;
@@ -748,32 +797,24 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
         goto fail_mmap_shared;
     }
 
-    // Initialize eventfds
-    struct vfio_connection *conn = &data->host_conn;
-    conn->device_fd = fd;
-    conn->bar0 = bar0;
-    conn->shared = shared;
-    conn->shared_size = shared_size;
-
-    if (!vfio_conn_get_eventfds(conn))
-        goto fail_mmap_shared;
-
+    data->host_conn.shared = shared;
+    data->host_conn.shared_size = shared_size;
 
     // Initialize ringbuffers
-    if (RB_SUCCESS != ringbuf_sec_infer_priv(&conn->host_to_client_rb, &hdr->host_to_client_pub,
+    if (RB_SUCCESS != ringbuf_sec_infer_priv(&data->host_conn.host_to_client_rb, &hdr->host_to_client_pub,
                                              (uint8_t *)shared + DAEMON_H2C_OFFSET, DAEMON_RING_SIZE,
                                              RINGBUF_FLAG_BLOCKING, RINGBUF_DIRECTION_READ,
                                              conn->incoming_eventfds[0], conn->outgoing_eventfds[0])) {
         log(LOGL_ERROR, "Failed to infer host_to_client_rb!");
-        goto fail_get_eventfds;
+        goto fail_mmap_shared;
     }
 
-    if (RB_SUCCESS != ringbuf_sec_infer_priv(&conn->client_to_host_rb, &hdr->client_to_host_pub,
+    if (RB_SUCCESS != ringbuf_sec_infer_priv(&data->host_conn.client_to_host_rb, &hdr->client_to_host_pub,
                                              (uint8_t *)shared + DAEMON_C2H_OFFSET, DAEMON_RING_SIZE,
                                              RINGBUF_FLAG_BLOCKING, RINGBUF_DIRECTION_WRITE,
                                              conn->incoming_eventfds[1], conn->outgoing_eventfds[1])) {
         log(LOGL_ERROR, "Failed to infer client_to_host_rb!");
-        goto fail_get_eventfds;
+        goto fail_mmap_shared;
     }
 
     // Send HELLO message to server and confirm response
@@ -782,26 +823,22 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
         .command = KVMCHAND_CMD_HELLO,
         .args = { KVMCHAND_API_VERSION },
     };
-    if (!kvmchand_send_message(conn, &msg, &ret)) {
+    if (!kvmchand_send_message(&data->host_conn, &msg, &ret)) {
         log(LOGL_ERROR, "Failed to confirm connection to host kvmchand! Did it crash?");
-        goto fail_get_eventfds;
+        goto fail_mmap_shared;
     }
 
     if (ret.ret != KVMCHAND_API_VERSION) {
         log(LOGL_ERROR, "Host kvmchand uses API version %llu but we're on %llu! Aborting.", ret,
             KVMCHAND_API_VERSION);
-        goto fail_get_eventfds;
+        goto fail_mmap_shared;
     }
 
     log(LOGL_INFO, "Successfully connected to host daemon.");
     return true;
 
-fail_get_eventfds:
-    vfio_conn_free_eventfds(conn);
 fail_mmap_shared:
     munmap(shared, shared_size);
-fail_mmap_bar0:
-    munmap(bar0, sizeof(struct ivshmem_bar0));
 fail:
     log(LOGL_ERROR, "Failed to connect to host daemon: %m!");
     return false;
@@ -865,21 +902,21 @@ static bool vfio_init(struct vfio_data *data, struct vec_voidp *ivshmem_devices,
 #error "Unimplemented IOMMU mode"
 #endif
 
-    // Initialize vecs
-    if (!vec_voidp_init(&data->device_fds, 10, free_destructor)) {
-        log(LOGL_ERROR, "Failed to initialize device_fds vec: %m!");
+    // Construct vector of connections
+    if (!vec_voidp_init(&data->connections, 10, NULL))
         goto fail_group_open;
-    }
 
     // Flush data and connect to host daemon
     data->container = container;
     data->group = group;
     if (!connect_to_host_daemon(data, ivshmem_devices))
-        goto fail_group_open;
+        goto fail_conn_vec;
 
     // Success
     return true;
 
+fail_conn_vec:
+    vec_voidp_destroy(&data->connections);
 fail_group_open:
     close(group);
 fail_container_open:
@@ -896,12 +933,12 @@ static void handle_ipc_message(struct ipc_message *msg) {
         .type = IPC_TYPE_RESP,
         .resp.error = true,
         .dest = msg->src,
-        .fd = -1,
+        .fd_count = 0,
         .id = msg->id
     };
 
     switch(cmd->command) {
-        case VFIO_CMD_FORWARD_KVMCHAND_MSG:
+        case VFIO_IPC_CMD_FORWARD_KVMCHAND_MSG:
         {
             // Unpack command into a kvmchand_msg
             struct kvmchand_message kmsg = {
@@ -915,20 +952,44 @@ static void handle_ipc_message(struct ipc_message *msg) {
             };
 
             /**
-             * For now, just a message and block for the first response.
+             * For now, just message and block for the first response.
              * We don't have the fancy multiplexing and message sequencing
              * that the IPC system has, so only one thread can use the
              * ivshmem communication channel at a time.
              */
             struct kvmchand_ret ret;
             if (!kvmchand_send_message(&g_vfio_data->host_conn, &kmsg, &ret)) {
-                log(LOGL_WARN, "Failed to forward message to dom0 kvmchand!\n");
+                log(LOGL_WARN, "Failed to forward message to dom0 kvmchand!");
                 break;
             }
 
+            log(LOGL_INFO, "resp from host: err: %d, ret: %d", ret.error, ret.ret);
             response.resp.error = ret.error;
             response.resp.ret = ret.ret;
 
+            break;
+        }
+
+        case VFIO_IPC_CMD_GET_CONN_FDS:
+        {
+            uint32_t ivposition = (uint32_t)cmd->args[0];
+            struct vfio_connection *conn = vfio_conn_find_by_ivposition(g_vfio_data, g_ivshmem_devices,
+                                                                        ivposition);
+            if (!conn) {
+                // IVPosition not found, return error
+                break;
+            }
+
+            // Return descriptors
+            response.fd_count = 5;
+            response.flags = IPC_FLAG_FD;
+            response.fds[0] = conn->device_fd;
+            response.fds[1] = conn->incoming_eventfds[0];
+            response.fds[2] = conn->incoming_eventfds[1];
+            response.fds[3] = conn->outgoing_eventfds[0];
+            response.fds[4] = conn->outgoing_eventfds[1];
+
+            response.resp.error = false;
             break;
         }
 
@@ -936,6 +997,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
             log_BUG("Unknown IPC command received in ivshmem loop: %"PRIu64, cmd->command);
     }
 
+out:
     if (msg->flags & IPC_FLAG_WANTRESP) {
         if (!ipc_send_message(&response, NULL))
             log_BUG("Unable to send response to IPC message!");
@@ -961,9 +1023,10 @@ void run_vfio_loop(int mainsoc) {
 
     if (ivshmem_devices.count == 0) {
         log(LOGL_ERROR, "Unable to find ivshmem device!\n"
-                " Is kvmchand running in daemon mode in dom0?");
+                " Is kvmchand running in host mode in dom0?");
         return;
     }
+    g_ivshmem_devices = &ivshmem_devices;
 
     for (size_t i=0; i<ivshmem_devices.count; i++) {
         log(LOGL_INFO, "Got ivshmem device: %s", ivshmem_devices.data[i]);

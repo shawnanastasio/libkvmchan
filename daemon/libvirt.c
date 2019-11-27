@@ -518,7 +518,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
         .type = IPC_TYPE_RESP,
         .resp.error = true,
         .dest = msg->src,
-        .fd = -1,
+        .fd_count = 0,
         .id = msg->id
     };
 

@@ -58,6 +58,8 @@ struct ringbuf_conn_data {
 };
 
 struct conn_info {
+    uint32_t ivposition; // IVPosition of this connection
+
     int socfd; // Socket file descriptor
     int shmfd; // Shared memory file descriptor
 
@@ -218,6 +220,33 @@ fail:
 }
 
 /**
+ * Get all file descriptors associated with a connection
+ */
+static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivposition, int *fds_out) {
+    struct client_info *info = get_client(server, pid, false, NULL);
+    if (!info)
+        return false;
+
+    struct conn_info *conn = NULL;
+    for (size_t i=0; i<info->connections.count; i++) {
+        struct conn_info *cur = info->connections.data[i];
+        if (cur->ivposition == ivposition) {
+            conn = cur;
+            break;
+        }
+    }
+    if (!conn)
+        return false;
+
+    fds_out[0] = conn->shmfd;
+    fds_out[1] = conn->incoming_eventfds[0];
+    fds_out[2] = conn->incoming_eventfds[1];
+    fds_out[3] = conn->outgoing_eventfds[0];
+    fds_out[3] = conn->outgoing_eventfds[1];
+    return true;
+}
+
+/**
  * Allocate an ivposition for a client.
  * @param client  client to allocate ivposition for
  * @return        allocated ivposition, or 0 on failure
@@ -320,6 +349,30 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
                         msg.args[1],
                         msg.args[2],
                         msg.args[3],
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+            ret.ret = ipc_resp.resp.ret;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_CLIENTINIT:
+        {
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_CONN,
+                    .args = {
+                        msg.args[0],
+                        msg.args[1],
                     },
                 },
                 .dest = IPC_DEST_MAIN,
@@ -498,6 +551,7 @@ static bool do_init_sequence(struct ivshmem_server *server, int fd) {
         }
 
         struct pending_conn *p = info->pending.data[0];
+        conn->ivposition = p->ivposition;
         conn->shmfd = p->shmfd;
         id = p->ivposition;
 
@@ -627,7 +681,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
         .type = IPC_TYPE_RESP,
         .resp.error = true,
         .dest = msg->src,
-        .fd = -1,
+        .fd_count = 0,
         .id = msg->id
     };
 
@@ -636,15 +690,29 @@ static void handle_ipc_message(struct ipc_message *msg) {
         {
             // Register up to two pending connections
             uint32_t ivpositions[2] = {0};
-            int shmfd = msg->fd;
+            int shmfd = msg->fds[0];
             for (uint8_t i=0; i<2; i++) {
                 pid_t pid = cmd->args[i];
                 if (pid)
                     ivpositions[i] = register_conn(&g_server, pid, shmfd);
             }
 
-            response.resp.ret = ((uint64_t)ivpositions[0] << 32) | ivpositions[1];
-            response.resp.error = (response.resp.ret == 0);
+            response.resp.ret = ivpositions[0];
+            response.resp.ret2 = ivpositions[1];
+            response.resp.error = (response.resp.ret == 0 && response.resp.ret2 == 0);
+
+            break;
+        }
+
+        case IVSHMEM_IPC_CMD_GET_CONN_FDS:
+        {
+            response.resp.error = !get_conn_fds(&g_server, (pid_t)cmd->args[0], (uint32_t)cmd->args[1],
+                                                response.fds);
+
+            if (!response.resp.error) {
+                response.fd_count = 5;
+                response.flags = IPC_FLAG_FD;
+            }
 
             break;
         }

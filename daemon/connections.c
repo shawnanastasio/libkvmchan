@@ -99,11 +99,13 @@ static pid_t get_domain_pid(uint32_t dom) {
  * @param port                  Port number
  * @param read_min              Minimum size of client->server ring buffer
  * @param write_min             Minimum size of server->client ring buffer
- * @param[out] server_ivpos_out Newly allocated ivposition for server
+ * @param[out] ivpos_out        Newly allocated ivposition for server, or client if server is remote
+ * @param[out] client_pid_out   QEMU PID of client, if remote
  * @return                      IVPosition of server, or 0 on failure
  */
 bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
-                uint64_t read_min, uint64_t write_min, uint32_t *server_ivpos_out) {
+                uint64_t read_min, uint64_t write_min, uint32_t *ivpos_out,
+                pid_t *client_pid_out) {
     log(LOGL_INFO, "vchan_init called! server_dom: %u, client_dom: %u, port %u, read_min: %lu, write_min: %lu",
             server_dom, client_dom, port, read_min, write_min);
 
@@ -126,6 +128,11 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
     // Calculate size of shm and allocate it
     size_t size = sizeof(shmem_hdr_t) + read_min + write_min + 32 /* 16-byte alignment for both rings */;
+
+    // Size needs to be page aligned
+    unsigned long page_mask = SYSTEM_PAGE_SIZE - 1;
+    if ((size & ~page_mask) != size)
+        size = (size + page_mask) & ~page_mask;
 
     /**
      * The size needs to be a power of 2 for now due to a restriction with
@@ -175,7 +182,8 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         },
         .dest = IPC_DEST_IVSHMEM,
         .flags = IPC_FLAG_FD | IPC_FLAG_WANTRESP,
-        .fd = memfd
+        .fd_count = 1,
+        .fds = {memfd}
     };
     if (!ipc_send_message(&msg, &resp)) {
         log(LOGL_ERROR, "Failed to send IPC message to IVSHMEM: %m.");
@@ -188,14 +196,13 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     }
 
     // Extract IVPosition(s) from result
-    uint64_t ivposition_packed = resp.resp.ret;
-    uint32_t server_ivposition = ivposition_packed >> 32;
-    uint32_t client_ivposition = ivposition_packed & 0xFFFFFFFF;
+    uint32_t server_ivposition = resp.resp.ret;
+    uint32_t client_ivposition = resp.resp.ret2;
 
     // Tell libvirt to attach a new ivshmem device to any remote domains
     msg.cmd.command = LIBVIRT_IPC_CMD_ATTACH_IVSHMEM;
-    msg.cmd.args[0] = (server_dom > 0) ? server_dom : -1;
-    msg.cmd.args[1] = (client_dom > 0) ? client_dom : -1;
+    msg.cmd.args[0] = (server_dom == 0) ? -1 : (int64_t)server_dom;
+    msg.cmd.args[1] = (client_dom == 0) ? -1 : (int64_t)client_dom;
     msg.dest = IPC_DEST_LIBVIRT;
     msg.flags = IPC_FLAG_WANTRESP;
     if (!ipc_send_message(&msg, &resp)) {
@@ -226,7 +233,10 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         goto fail_register_conn;
     }
 
-    *server_ivpos_out = server_ivposition;
+    *ivpos_out = (server_dom > 0) ? server_ivposition : client_ivposition;
+    if (client_dom > 0)
+        *client_pid_out = client_pid;
+
     return true;
 
 fail_register_conn:
@@ -235,4 +245,28 @@ fail_memfd:
     close(memfd);
 fail:
     return false;
+}
+
+/**
+ * Connect to an existing vchan.
+ *
+ * @param      dom       domain number of server that started the vchan
+ * @param      port      port number
+ * @param[out] ivpos_out client ivposition
+ * @return               success?
+ */
+bool vchan_conn(uint32_t dom, uint32_t port, uint32_t *ivpos_out) {
+    struct connection *conn = connections_get_by_server_dom(dom, port);
+    if (!conn) {
+        log(LOGL_WARN, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
+            dom, port);
+        return false;
+    }
+
+    if (conn->client.dom == 0)
+        *ivpos_out = 0;
+    else
+        *ivpos_out = conn->client.ivposition;
+
+    return true;
 }

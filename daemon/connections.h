@@ -44,6 +44,8 @@ struct connection {
 
 bool connections_init(void);
 bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
-                uint64_t read_min, uint64_t write_min, uint32_t *server_ivpos_out);
+                uint64_t read_min, uint64_t write_min, uint32_t *ivpos_out,
+                pid_t *client_pid_out);
+bool vchan_conn(uint32_t dom, uint32_t port, uint32_t *ivpos_out);
 
 #endif //KVMCHAND_CONNECTIONS_H

@@ -184,6 +184,87 @@ static inline uint8_t dest_to_socket(uint8_t dest) {
     }
 }
 
+static ssize_t ipcmsg_send(int socfd, void *data, size_t len, int fds[IPC_FD_MAX], uint8_t fd_count) {
+    union {
+        char cmsgbuf[CMSG_SPACE(sizeof(int) * IPC_FD_MAX)];
+        struct cmsghdr align;
+    } u;
+
+    struct cmsghdr *cmsg;
+    struct iovec iov = { .iov_base = data, .iov_len = len };
+    struct msghdr msg = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_flags = 0,
+        .msg_control = fds ? u.cmsgbuf : NULL,
+        .msg_controllen = fds ? CMSG_LEN(sizeof(int) * fd_count) : 0,
+    };
+
+    /* Initialize the control message to hand off the fds */
+    if (fds) {
+        cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int) * fd_count);
+
+        for (uint8_t i=0; i<fd_count; i++) {
+            ((int *)CMSG_DATA(cmsg))[i] = fds[i];
+        }
+    }
+
+    return sendmsg(socfd, &msg, 0);
+}
+
+static ssize_t ipcmsg_recv(int socfd, void *buf, size_t len, int fds_out[IPC_FD_MAX]) {
+    ssize_t s;
+    union {
+        char cmsgbuf[CMSG_SPACE(sizeof(int) * IPC_FD_MAX)];
+        struct cmsghdr align;
+    } u;
+
+    struct cmsghdr *cmsg;
+    struct iovec iov = { .iov_base = buf, .iov_len = len };
+    struct msghdr msg = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_flags = 0,
+        .msg_control = u.cmsgbuf,
+        .msg_controllen = CMSG_LEN(sizeof(int) * IPC_FD_MAX)
+    };
+
+    if ((s = recvmsg(socfd, &msg, 0)) < 0)
+        return s;
+
+    if (fds_out) {
+        cmsg = CMSG_FIRSTHDR(&msg);
+        if (msg.msg_controllen < CMSG_LEN(sizeof(int))) {
+            fds_out[0] = -1;
+            goto out;
+        }
+
+        // Copy all fds to fds_out
+        uint8_t *in = CMSG_DATA(cmsg);
+        uint8_t *max = in + msg.msg_controllen;
+        uint8_t i=0;
+        while (in + sizeof(int) <= max && i < IPC_FD_MAX) {
+            fds_out[i++] = *(int *)in;
+            in += sizeof(int);
+        }
+
+        // Set any remaining fds to -1
+        for (; i<IPC_FD_MAX; i++) {
+            fds_out[i] = -1;
+        }
+    }
+
+out:
+    return s;
+}
+
 static bool push_request(struct dispatcher_data *data, struct ipc_message *msg,
                          uint32_t *id_out) {
     bool res = false;
@@ -265,18 +346,20 @@ out:
 }
 
 static bool server_receive_message(int socfd, struct ipc_message *out) {
-    int incoming_fd;
-    ssize_t n = socmsg_recv(socfd, out, sizeof(struct ipc_message), &incoming_fd);
+    int incoming_fds[IPC_FD_MAX];
+    ssize_t n = ipcmsg_recv(socfd, out, sizeof(struct ipc_message), incoming_fds);
     if (n <= 0)
         return false;
 
     if (out->flags & IPC_FLAG_FD) {
-        if (incoming_fd < 0) {
-            errno = EINVAL;
-            return false;
+        for (uint8_t i=0; i<out->fd_count; i++) {
+            if (incoming_fds[i] == -1) {
+                errno = EINVAL;
+                return false;
+            }
         }
 
-        out->fd = incoming_fd;
+        memcpy(out->fds, incoming_fds, sizeof(int) * IPC_FD_MAX);
     }
 
     return true;
@@ -332,12 +415,12 @@ static void *dispatcher_thread(void *data_) {
             struct ipc_message *msg = data->requests.data[0];
             ASSERT(msg);
 
-            int fd = (msg->flags & IPC_FLAG_FD) ? msg->fd : -1;
+            int *fds = (msg->flags & IPC_FLAG_FD) ? msg->fds : NULL;
             int dest = (data->is_server) ? data->socfds[dest_to_socket(msg->dest)]: data->socfd;
             if (dest < 0)
                 log_BUG("Invalid IPC message destination!");
 
-            if (socmsg_send(dest, msg, sizeof(struct ipc_message), fd) < 0) {
+            if (ipcmsg_send(dest, msg, sizeof(struct ipc_message), fds, msg->fd_count) < 0) {
                 log(LOGL_ERROR, "Unable to send IPC message: %m! fd: %d", data->socfd);
                 goto skip;
             }
@@ -358,9 +441,9 @@ static void *client_receiver_thread(void *data_) {
     for(;;) {
         // Wait for message
         struct ipc_message msg;
-        int incoming_fd = -1;
-        ssize_t n = socmsg_recv(data->socfd, &msg, sizeof(struct ipc_message),
-                                &incoming_fd);
+        int incoming_fds[IPC_FD_MAX];
+        ssize_t n = ipcmsg_recv(data->socfd, &msg, sizeof(struct ipc_message),
+                                incoming_fds);
         if (n == 0) {
             log(LOGL_ERROR, "BUG! IPC socket reached EOF!");
             bail_out();
@@ -370,10 +453,13 @@ static void *client_receiver_thread(void *data_) {
             bail_out();
         }
 
-        // Insert fd into struct if received
+        // Insert fds into struct if received
         if (msg.flags & IPC_FLAG_FD) {
-            ASSERT(incoming_fd > 0);
-            msg.fd = incoming_fd;
+            for (uint8_t i=0; i<msg.fd_count; i++) {
+                ASSERT(incoming_fds[i] != -1);
+            }
+
+            memcpy(msg.fds, incoming_fds, sizeof(int) * IPC_FD_MAX);
         }
 
         if (msg.type == IPC_TYPE_RESP) {
@@ -432,13 +518,17 @@ static void *server_receiver_thread(void *data_) {
                 if (socfd < 0)
                     log_BUG("Invalid IPC destination %u!", msg.dest);
 
-                int fd = (msg.flags & IPC_FLAG_FD) ? msg.fd : -1;
-                if (socmsg_send(socfd, &msg, sizeof(struct ipc_message), fd) < 0)
+                int *fds = (msg.flags & IPC_FLAG_FD) ? msg.fds : NULL;
+                if (ipcmsg_send(socfd, &msg, sizeof(struct ipc_message), fds, msg.fd_count) < 0)
                     goto fail_errno;
 
-                // Close fd now that we're done forwarding it
-                if (fd > 0)
-                    close(fd);
+                // Close fds now that we're done forwarding them
+                if (fds) {
+                    for (uint8_t i=0; i<IPC_FD_MAX; i++) {
+                        if (fds[i] != -1)
+                            close(fds[i]);
+                    }
+                }
 
             } else if (msg.type == IPC_TYPE_RESP) {
                 // Message needs to be inserted into response queue

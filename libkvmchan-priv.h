@@ -60,7 +60,14 @@ struct kvmchand_message {
      * args[2] - (u64) read_min
      * args[3] - (u64) write_min
      *
+     * Note: In some cases it may not be possible to immediately return
+     * all connection fds. In this case, ret will not indicate an error but
+     * the fd count will be 0 and the user must request the fds at a later time
+     * using KVMCHAND_CMD_GET_CONN_FDS.
+     *
      * ret - (u32) The IVPosition of the new ivshmem device, or 0 if called from dom0.
+     * fds_count - 5
+     * fds - vchan shmfd, incoming eventfds 0-1, outgoing eventfds 0-1
      */
 #define KVMCHAND_CMD_SERVERINIT 1
 
@@ -69,9 +76,24 @@ struct kvmchand_message {
      * arg0 (int) - domain # of server
      * arg1 (int) - port
      *
-     * ret - TBD
+     * Note: In some cases it may not be possible to immediately return
+     * all connection fds. In this case, ret will not indicate an error but
+     * the fd count will be 0 and the user must request the fds at a later time
+     * using KVMCHAND_CMD_GET_CONN_FDS.
+     *
+     * ret - (u32) The IVPosition of the ivshmem device, or 0 if called from dom0.
+     * fds_count - 5
+     * fds - vchan shmfd, incoming eventfds 0-1, outgoing eventfds 0-1
      */
 #define KVMCHAND_CMD_CLIENTINIT 2
+
+    /**
+     * Get connection fds for an existing vchan
+     * arg0 (u32) - IVPosition of the ivshmem device backing the requested vchan
+     *
+     * ret (u32)
+     */
+#define KVMCHAND_CMD_GET_CONN_FDS 3
 
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
@@ -82,6 +104,9 @@ struct kvmchand_message {
 struct kvmchand_ret {
     int64_t ret;
     bool error;
+
+    uint8_t fd_count; // Number of file descriptors returned
+#define KVMCHAND_FD_MAX 5
 };
 
 /**

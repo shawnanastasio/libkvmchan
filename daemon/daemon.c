@@ -241,7 +241,7 @@ static void handle_message(struct ipc_message *msg) {
         .type = IPC_TYPE_RESP,
         .resp.error = true,
         .dest = msg->src,
-        .fd = -1,
+        .fd_count = 0,
         .id = msg->id
     };
 
@@ -249,7 +249,13 @@ static void handle_message(struct ipc_message *msg) {
         case MAIN_IPC_CMD_VCHAN_INIT:
             response.resp.error = !vchan_init((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
                                            (uint32_t)cmd->args[2], (uint64_t)cmd->args[3],
-                                           (uint64_t)cmd->args[4], (uint32_t *)&response.resp.ret);
+                                           (uint64_t)cmd->args[4], (uint32_t *)&response.resp.ret,
+                                           (pid_t *)&response.resp.ret2);
+            break;
+
+        case MAIN_IPC_CMD_VCHAN_CONN:
+            response.resp.error = !vchan_conn((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
+                                              (uint32_t *)&response.resp.ret);
             break;
 
         default:

@@ -42,6 +42,7 @@ struct ipc_message {
 
         struct ipc_resp {
             int64_t ret;
+            int64_t ret2;
             bool error;
         } resp;
     };
@@ -59,12 +60,15 @@ struct ipc_message {
 #define IPC_FLAG_WANTRESP  (1 << 1) // Expect a response
 
     /**
-     * For sending, this FD will be sent via SCM_RIGHTS.
-     * For receiving, this FD will come from SCM_RIGHTS.
+     * For sending, these FDs will be sent via SCM_RIGHTS.
+     * For receiving, these FDs will come from SCM_RIGHTS.
+     * fd_count contains the number of fds to send.
      *
      * Only if IPC_FLAG_FD is set.
      */
-    int fd;
+    uint8_t fd_count;
+#define IPC_FD_MAX 5
+    int fds[IPC_FD_MAX];
 
     /**
      * This is a unique sequence number for this message.
@@ -84,9 +88,20 @@ struct ipc_message {
  * args[4] - (u64) write_min
  *
  * resp.error - error?
- * resp.ret   - server's new IVPosition, or 0 if local
+ * resp.ret   - (u32) server's new IVPosition (if remote), else client's new IVPosition
+ * resp.ret2  - (pid_t) PID of client qemu process (if remote)
  */
 #define MAIN_IPC_CMD_VCHAN_INIT 0
+
+/**
+ * Connect to an existing vchan.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) port
+ *
+ * resp.error - error?
+ * resp.ret   - IVPosition of ivshmem device, or 0 if local
+ */
+#define MAIN_IPC_CMD_VCHAN_CONN 1
 
 // libvirt process commands
 
@@ -123,10 +138,11 @@ struct ipc_message {
  * Register a new upcomming connection with ivshmem.
  * args[0] - (pid_t) QEMU pid that will soon connect, or -1
  * args[1] - (pid_t) Another QEMU pid that will soon connect, or -1
- * fd - memfd backing shared storage
+ * fds[0] - memfd backing shared storage
  *
  * resp.error - error?
- * resp.ret - (u64) (((u64)ivposition0 << 32) | (u32)ivposition1)
+ * resp.ret - (u64) ivposition0
+ * resp.ret2 - (u32) ivposition1
  *
  * Since this function can register up to two QEMU pids, the return
  * value contains the IVPosition values for the ivshmem devices created.
@@ -134,6 +150,20 @@ struct ipc_message {
  * The lower 32 bits contain the IVPosition for the pid in args[1], or 0 if not provided.
  */
 #define IVSHMEM_IPC_CMD_REGISTER_CONN 0
+
+/**
+ * Get all file descriptors (memfd, 4x eventfd) for a given connection.
+ * args[0] - (pid_t) QEMU pid that connection was made with
+ * args[1] - (u32) IVPosition of connection
+ *
+ * resp.error - error?
+ * fds[0] - memfd
+ * fds[1] - incoming eventfd 0
+ * fds[2] - incoming eventfd 1
+ * fds[3] - outgoing eventfd 0
+ * fds[4] - outgoing eventfd 1
+ */
+#define IVSHMEM_IPC_CMD_GET_CONN_FDS 1
 
 // VFIO process commands
 
@@ -148,7 +178,20 @@ struct ipc_message {
  * resp.error - error?
  * resp.ret - (i64) return value
  */
-#define VFIO_CMD_FORWARD_KVMCHAND_MSG 0
+#define VFIO_IPC_CMD_FORWARD_KVMCHAND_MSG 0
+
+/**
+ * Get all file descriptors (VFIO device fd, 4x eventfd) for a given connection.
+ * args[0] - (u32) IVPosition of connection
+ *
+ * resp.error - error?
+ * fds[0] - VFIO device fd of corresponding ivshmem device
+ * fds[1] - incoming eventfd 0
+ * fds[2] - incoming eventfd 1
+ * fds[3] - outgoing eventfd 0
+ * fds[4] - outgoing eventfd 1
+ */
+#define VFIO_IPC_CMD_GET_CONN_FDS 1
 
 void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
                       void (*message_handler)(struct ipc_message *));

@@ -26,8 +26,12 @@
 
 #define LIBKVMCHAN_EXPORTED __attribute__((__visibility__("default")))
 
-#define LIBKVM_FLAG_HOST (1 << 0)
+struct libkvmchan;
 
+LIBKVMCHAN_EXPORTED struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t read_min,
+                                                              size_t write_min);
+#if 0
+#define LIBKVM_FLAG_HOST (1 << 0)
 // A handle to an opened shared memory region.
 typedef struct libkvmchan_shm_handle {
     void *shm; // Raw pointer to virtual memory region
@@ -45,5 +49,6 @@ LIBKVMCHAN_EXPORTED bool libkvmchan_write(libkvmchan_t *chan, const void *data, 
 LIBKVMCHAN_EXPORTED bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size);
 LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(libkvmchan_t *chan);
 LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(libkvmchan_t *chan);
+#endif
 
 #endif // LIBKVMCHAN_H
