@@ -255,7 +255,8 @@ static void handle_message(struct ipc_message *msg) {
 
         case MAIN_IPC_CMD_VCHAN_CONN:
             response.resp.error = !vchan_conn((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
-                                              (uint32_t *)&response.resp.ret);
+                                              (uint32_t)cmd->args[2], (uint32_t *)&response.resp.ret,
+                                              (pid_t *)&response.resp.ret2);
             break;
 
         default:

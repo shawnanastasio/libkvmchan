@@ -44,10 +44,10 @@ bool connections_init(void) {
     return true;
 }
 
-struct connection *connections_get_by_server_dom(uint32_t dom, uint32_t port) {
+struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     for (size_t i=0; i<connections.count; i++) {
         struct connection *cur = connections.data[i];
-        if (cur->server.dom == dom && cur->port == port) {
+        if (cur->server.dom == server_dom && cur->client.dom == client_dom && cur->port == port) {
             return cur;
         }
     }
@@ -100,7 +100,7 @@ static pid_t get_domain_pid(uint32_t dom) {
  * @param read_min              Minimum size of client->server ring buffer
  * @param write_min             Minimum size of server->client ring buffer
  * @param[out] ivpos_out        Newly allocated ivposition for server, or client if server is remote
- * @param[out] client_pid_out   QEMU PID of client, if remote
+ * @param[out] client_pid_out   qemu PID of client, if remote
  * @return                      IVPosition of server, or 0 on failure
  */
 bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
@@ -121,7 +121,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     }
 
     // Make sure that there isn't already a vchan on this server/port
-    if (connections_get_by_server_dom(server_dom, port)) {
+    if (connections_get_by_dom(server_dom, client_dom, port)) {
         log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
     }
@@ -250,23 +250,32 @@ fail:
 /**
  * Connect to an existing vchan.
  *
- * @param      dom       domain number of server that started the vchan
- * @param      port      port number
- * @param[out] ivpos_out client ivposition
- * @return               success?
+ * @param      server_dom domain number of vchan's server
+ * @param      client_dom domain number of vchan's client
+ * @param      port       port number
+ * @param[out] ivpos_out  client ivposition
+ * @param[out] pid_out    qemu PID of client, or of server client is dom 0
+ * @return                success?
  */
-bool vchan_conn(uint32_t dom, uint32_t port, uint32_t *ivpos_out) {
-    struct connection *conn = connections_get_by_server_dom(dom, port);
+bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
+                uint32_t *ivpos_out, pid_t *pid_out) {
+    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port);
     if (!conn) {
         log(LOGL_WARN, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
-            dom, port);
+            server_dom, port);
         return false;
     }
 
-    if (conn->client.dom == 0)
-        *ivpos_out = 0;
-    else
+    if (client_dom == 0) {
+        // Called from dom 0, return the ivpos+pid of the server so that
+        // the conn fds for this connection can be looked up by the caller
+        *ivpos_out = conn->server.ivposition;
+        *pid_out = conn->server.pid;
+    } else {
+        // Called from guest, return the guest's ivpos+pid which can be looked up directly
         *ivpos_out = conn->client.ivposition;
+        *pid_out = conn->client.pid;
+    }
 
     return true;
 }

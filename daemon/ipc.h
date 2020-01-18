@@ -96,10 +96,12 @@ struct ipc_message {
 /**
  * Connect to an existing vchan.
  * args[0] - (u32) domain # of server
- * args[1] - (u32) port
+ * args[1] - (u32) domain # of client
+ * args[2] - (u32) port
  *
  * resp.error - error?
- * resp.ret   - IVPosition of ivshmem device, or 0 if local
+ * resp.ret   - (u32) IVPosition of ivshmem device, or 0 if local
+ * resp.ret2  - (pid_t) PID of server qemu process (if remote)
  */
 #define MAIN_IPC_CMD_VCHAN_CONN 1
 

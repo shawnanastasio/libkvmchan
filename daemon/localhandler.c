@@ -192,6 +192,7 @@ static bool handle_client_message_guest(int fd, struct kvmchand_message *msg) {
             break;
 
         case KVMCHAND_CMD_SERVERINIT:
+        case KVMCHAND_CMD_CLIENTINIT:
             // Defer the command to dom0 so that the connection can be made.
             // Since it takes some time for the ivshmem device to show up,
             // don't immediately obtain the file descriptors. The user can
@@ -297,7 +298,6 @@ static bool handle_client_message_dom0(int fd, struct kvmchand_message *msg) {
                 goto out;
             }
 
-            log(LOGL_INFO, "fds: {%d, %d, %d, %d, %d}", ipc_resp.fds[0], ipc_resp.fds[1], ipc_resp.fds[2], ipc_resp.fds[3], ipc_resp.fds[4]);
             ret.fd_count = 5;
             memcpy(fds, ipc_resp.fds, ret.fd_count * sizeof(int));
 
@@ -317,6 +317,7 @@ static bool handle_client_message_dom0(int fd, struct kvmchand_message *msg) {
                     .command = MAIN_IPC_CMD_VCHAN_CONN,
                     .args = {
                         msg->args[0],
+                        0,
                         msg->args[1],
                     }
                 },
@@ -327,6 +328,23 @@ static bool handle_client_message_dom0(int fd, struct kvmchand_message *msg) {
             struct ipc_message ipc_resp;
             if (!ipc_send_message(&ipc_msg, &ipc_resp))
                 goto out;
+            if (ipc_resp.resp.error)
+                goto out;
+
+            // Get all file descriptors for the connection
+            ipc_msg.cmd.command = IVSHMEM_IPC_CMD_GET_CONN_FDS;
+            ipc_msg.cmd.args[0] = (pid_t)ipc_resp.resp.ret2;
+            ipc_msg.cmd.args[1] = (uint32_t)ipc_resp.resp.ret;
+            ipc_msg.dest = IPC_DEST_IVSHMEM;
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                goto out;
+            if (ipc_resp.resp.error) {
+                log(LOGL_ERROR, "Failed to get fds for vchan!");
+                goto out;
+            }
+
+            ret.fd_count = 5;
+            memcpy(fds, ipc_resp.fds, ret.fd_count * sizeof(int));
 
             // Forward response to client
             ret.error = ipc_resp.resp.error;

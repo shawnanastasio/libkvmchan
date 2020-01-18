@@ -366,12 +366,14 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
 
         case KVMCHAND_CMD_CLIENTINIT:
         {
+            uint32_t dom = client_get_domain(client);
             struct ipc_message ipc_resp, ipc_msg = {
                 .type = IPC_TYPE_CMD,
                 .cmd = {
                     .command = MAIN_IPC_CMD_VCHAN_CONN,
                     .args = {
                         msg.args[0],
+                        dom,
                         msg.args[1],
                     },
                 },
@@ -693,7 +695,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
             int shmfd = msg->fds[0];
             for (uint8_t i=0; i<2; i++) {
                 pid_t pid = cmd->args[i];
-                if (pid)
+                if (pid > 0)
                     ivpositions[i] = register_conn(&g_server, pid, shmfd);
             }
 
