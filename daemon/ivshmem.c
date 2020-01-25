@@ -242,7 +242,7 @@ static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivpo
     fds_out[1] = conn->incoming_eventfds[0];
     fds_out[2] = conn->incoming_eventfds[1];
     fds_out[3] = conn->outgoing_eventfds[0];
-    fds_out[3] = conn->outgoing_eventfds[1];
+    fds_out[4] = conn->outgoing_eventfds[1];
     return true;
 }
 
