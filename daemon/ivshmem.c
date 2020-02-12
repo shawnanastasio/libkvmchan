@@ -788,6 +788,8 @@ void run_ivshmem_loop(int mainsoc) {
                     log(LOGL_WARN, "Couldn't add fd to epoll set: %m");
                     goto error;
                 }
+                close(fd);
+
             } else {
                 // Event from a client fd, check if it was closed
                 int fd = events[i].data.fd;
