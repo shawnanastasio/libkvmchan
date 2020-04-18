@@ -780,6 +780,7 @@ void run_ivshmem_loop(int mainsoc) {
 
                 if (!do_init_sequence(&g_server, fd)) {
                     log(LOGL_WARN, "Couldn't do init sequence with client on fd %d: %m", fd);
+                    close(fd);
                     continue;
                 }
 
