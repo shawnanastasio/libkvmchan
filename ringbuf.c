@@ -54,12 +54,14 @@ static void block_on_eventfd(int eventfd) {
     ignore_value(select(eventfd + 1, &rfds, NULL, NULL, NULL));
 }
 
-static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size) {
+static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size,
+                                bool stream_mode, size_t *size_out) {
     int eventfd = priv->incoming_eventfd;
 
     assert(eventfd > 0);
     assert(priv->direction != RINGBUF_DIRECTION_WRITE);
 
+    size_t avail = 0;
     for(;;) {
         // If pub was provided, validate and flush data
         if (pub) {
@@ -68,13 +70,26 @@ static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size
                 return RB_SEC_FAIL;
         }
 
-        if (ringbuf_available(priv) >= size)
-            return RB_SUCCESS;
+        avail = ringbuf_available(priv);
+        if (stream_mode && (avail >= 1)) {
+            // Stream mode, wait for >=1 bytes
+            if (avail < size)
+                size = avail;
+            goto success;
+        } else if (!stream_mode && (avail >= size)) {
+            // Packet mode, we need to wait for at least `size` bytes
+            goto success;
+        }
 
         uint64_t buf;
         block_on_eventfd(eventfd);
         ignore_value(read(eventfd, &buf, 8));
     }
+
+success:
+    if (size_out)
+        *size_out = size;
+    return RB_SUCCESS;
 }
 
 static void notify_read(ringbuf_t *priv) {
@@ -88,12 +103,14 @@ static void notify_read(ringbuf_t *priv) {
     ignore_value(write(eventfd, &buf, 8));
 }
 
-static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size) {
+static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size,
+                                 bool stream_mode, size_t *size_out) {
     int eventfd = priv->incoming_eventfd;
 
     assert(eventfd > 0);
     assert(priv->direction != RINGBUF_DIRECTION_READ);
 
+    size_t free_space = 0;
     for(;;) {
         // If pub was provided, validate and flush data
         if (pub) {
@@ -103,13 +120,26 @@ static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t siz
             }
         }
 
-        if (ringbuf_free_space(priv) >= size)
-            return RB_SUCCESS;
+        free_space = ringbuf_free_space(priv);
+        if (stream_mode && (free_space >= 1)) {
+            // Stream mode, wait for >= 1 bytes of free space
+            if (free_space < size)
+                size = free_space;
+            goto success;
+        } else if (!stream_mode && (free_space >= size)) {
+            // Stream mode, wait for >= `size` bytes of free space
+            goto success;
+        }
 
         uint64_t buf;
         block_on_eventfd(eventfd);
         ignore_value(read(eventfd, &buf, 8));
     }
+
+success:
+    if (size_out)
+        *size_out = size;
+    return RB_SUCCESS;
 }
 
 static void notify_write(ringbuf_t *priv) {
@@ -230,18 +260,20 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
 
     return RB_SUCCESS;
 }
-
 /**
  * Write to a sec ringbuffer.
+ * Private implementation of sec_write and sec_send
  *
- * @param priv  private ring buffer data to act on
- * @param pub   public ring buffer data to act on
- * @param data  buffer of data to write to ring buffer
- * @param size  amount of data to write
- * @return      ring buffer return code
+ * @param priv          private ring buffer data to act on
+ * @param pub           public ring buffer data to act on
+ * @param data          buffer of data to write to ring buffer
+ * @param size          amount of data to write
+ * @param stream_mode   whether or not to use stream semantics
+ * @param[out] size_out amount of data written (stream only)
+ * @return              ring buffer return code
  */
-ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data,
-                                size_t size) {
+static ringbuf_ret_t ringbuf_sec_write_impl(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size,
+                                     bool stream_mode, size_t *size_out) {
     if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
         // Flush pos_start from public struct
         priv->pos_start = pub->pos_start_untrusted;
@@ -250,11 +282,21 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
         }
 
         size_t free_space = ringbuf_free_space(priv);
-        if (free_space < size)
-            return RB_NOSPACE;
+        if (stream_mode) {
+            // Stream mode, write as long as 1 byte is free
+            if (free_space == 0)
+                return RB_NOSPACE;
+
+            if (free_space < size)
+                size = free_space;
+        } else {
+            // Packet mode, write only if `size` bytes are free
+            if (free_space < size)
+                return RB_NOSPACE;
+        }
     } else {
         ringbuf_ret_t rret;
-        if ((rret = block_write(priv, pub, size)) != RB_SUCCESS)
+        if ((rret = block_write(priv, pub, size, stream_mode, &size)) != RB_SUCCESS)
             return rret;
     }
 
@@ -270,19 +312,53 @@ ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void 
     if (priv->flags & RINGBUF_FLAG_BLOCKING)
         notify_write(priv);
 
+    if (size_out)
+        *size_out = size;
+
     return RB_SUCCESS;
 }
 
 /**
- * Read from a sec ringbuffer.
+ * Write to a sec ringbuffer. (Packet mode)
  *
  * @param priv  private ring buffer data to act on
  * @param pub   public ring buffer data to act on
- * @param buf   buffer to read data into
- * @param size  amount of data to read
+ * @param data  buffer of data to write to ring buffer
+ * @param size  amount of data to write
  * @return      ring buffer return code
  */
-ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size) {
+ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size) {
+    return ringbuf_sec_write_impl(priv, pub, data, size, false, NULL);
+}
+
+/**
+ * Write to a sec ringbuffer. (Stream mode)
+ *
+ * @param priv          private ring buffer data to act on
+ * @param pub           public ring buffer data to act on
+ * @param data          buffer of data to write to ring buffer
+ * @param size          maximum amount of data to write
+ * @param[out] size_out amount of data actually written
+ * @return              ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_write_stream(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size,
+                                       size_t *size_out) {
+    return ringbuf_sec_write_impl(priv, pub, data, size, true, size_out);
+}
+
+/**
+ * Private implementation of sec_read and sec_recv.
+ *
+ * @param priv          private ring buffer data to act on
+ * @param pub           public ring buffer data to act on
+ * @param buf           buffer to read data into
+ * @param size          amount of data to read
+ * @param stream_mode   whether or not to use stream semantics
+ * @param[out] size_out amount of data read (stream only)
+ * @return              ring buffer return code
+ */
+static ringbuf_ret_t ringbuf_sec_read_impl(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size,
+                                           bool stream_mode, size_t *size_out) {
     if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
         // Flush pos_end from public struct
         priv->pos_end = pub->pos_end_untrusted;
@@ -291,11 +367,21 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
         }
 
         size_t available = ringbuf_available(priv);
-        if (available < size)
-            return RB_NOSPACE;
+        if (stream_mode) {
+            // Stream mode, read as long as 1 byte is available
+            if (available == 0)
+                return RB_NOSPACE;
+
+            if (available < size)
+                size = available;
+        } else {
+            // Packet mode, read only if `size` bytes are available
+            if (available < size)
+                return RB_NOSPACE;
+        }
     } else {
         ringbuf_ret_t rret;
-        if ((rret = block_read(priv, pub, size)) != RB_SUCCESS)
+        if ((rret = block_read(priv, pub, size, stream_mode, &size)) != RB_SUCCESS)
             return rret;
     }
 
@@ -311,6 +397,75 @@ ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, s
     if (priv->flags & RINGBUF_FLAG_BLOCKING)
         notify_read(priv);
 
+    if (size_out)
+        *size_out = size;
+
+    return RB_SUCCESS;
+}
+
+/**
+ * Read from a sec ringbuffer. (Packet mode)
+ *
+ * @param priv  private ring buffer data to act on
+ * @param pub   public ring buffer data to act on
+ * @param buf   buffer to read data into
+ * @param size  amount of data to read
+ * @return      ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size) {
+    return ringbuf_sec_read_impl(priv, pub, buf, size, false, NULL);
+}
+
+/**
+ * Read from a sec ringbuffer. (Stream mode)
+ *
+ * @param priv          private ring buffer data to act on
+ * @param pub           public ring buffer data to act on
+ * @param buf           buffer to read data into
+ * @param size          maximum amount of data to read
+ * @param[out] size_out the amount of data that was actually read
+ * @return              ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_read_stream(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size,
+                                      size_t *size_out) {
+    return ringbuf_sec_read_impl(priv, pub, buf, size, true, size_out);
+}
+
+/**
+ * Determine the amount of available bytes to read in a sec ringbuffer.
+ *
+ * @param priv               private ring buffer data to act on
+ * @param pub                public ring buffer data to act on
+ * @param[out] available_out number of available bytes will be written here on success
+ * @return                   ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_available(ringbuf_t *priv, ringbuf_pub_t *pub, size_t *available_out) {
+    // Flush pos_end from public struct
+    priv->pos_end = pub->pos_end_untrusted;
+    if (priv->pos_end > priv->size) {
+        return RB_SEC_FAIL;
+    }
+
+    *available_out = ringbuf_available(priv);
+    return RB_SUCCESS;
+}
+
+/**
+ * Determine the amount of free bytes to write in a sec ringbuffer.
+ *
+ * @param priv          private ring buffer data to act on
+ * @param pub           public ring buffer data to act on
+ * @param[out] free_out number of free bytes will be written here on success
+ * @return              ring buffer return code
+ */
+ringbuf_ret_t ringbuf_sec_free_space(ringbuf_t *priv, ringbuf_pub_t *pub, size_t *free_out) {
+    // Flush pos_start from public struct
+    priv->pos_start = pub->pos_start_untrusted;
+    if (priv->pos_start > priv->size) {
+        return RB_SEC_FAIL;
+    }
+
+    *free_out = ringbuf_free_space(priv);
     return RB_SUCCESS;
 }
 
@@ -366,13 +521,15 @@ ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flag
 }
 
 ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size) {
+    if (!size)
+        return RB_SUCCESS;
     if (size > USABLE(rb))
         return RB_NOSPACE;
 
     // If this rb is blocking (and isn't a sec copy), wait for space to become available.
     // Sec copies handle blocking in their respective wrapper functions.
     if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY)) {
-        block_write(rb, NULL, size);
+        block_write(rb, NULL, size, false, NULL);
     } else if (ringbuf_free_space(rb) < size) {
         return RB_NOSPACE;
     }
@@ -412,13 +569,15 @@ out:
 }
 
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
+    if (!size)
+        return RB_SUCCESS;
     if (size > USABLE(rb))
         return RB_NOSPACE;
 
     // If this rb is blocking (and isn't a sec copy), wait for data.
     // Sec copies handle blocking in their respective wrapper functions.
     if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY)) {
-        block_read(rb, NULL, size);
+        block_read(rb, NULL, size, false, NULL);
     } else if (ringbuf_available(rb) - ringbuf_free_space(rb) < size) {
         return RB_NODATA;
     }
@@ -457,15 +616,13 @@ out:
 
 /**
  * Return an eventfd that will notify when data is available to read
- * from the given ringbuffer. If provided, data from the ringbuf_pub_t
- * structure will be used to determine available space.
+ * from the given ringbuffer.
  *
  * @param rb ringbuf_t structure to notify on
- * @param pub ringbuf_pub_t to fetch pos_end from, or NULL to use `rb`
  * @return file descriptor for eventfd, or -1 on failure
  */
-int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
-    if (rb->incoming_eventfd > 0 && rb->direction != RINGBUF_DIRECTION_WRITE) {
+int ringbuf_get_eventfd(ringbuf_t *rb) {
+    if (rb->incoming_eventfd > 0 && rb->direction == RINGBUF_DIRECTION_READ) {
         return rb->incoming_eventfd;
     }
 
@@ -474,13 +631,14 @@ int ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub) {
 }
 
 void ringbuf_clear_eventfd(ringbuf_t *rb) {
-    // sponge
+    int fd = ringbuf_get_eventfd(rb);
+    if (fd < 0)
+        return;
+
     // Temporarily disable blocking and reset the eventfd's counter
-    /*
     uint64_t buf;
-    int fd_flags = fcntl(rb->eventfd, F_GETFL, 0);
-    fcntl(rb->eventfd, F_SETFL, fd_flags | O_NONBLOCK);
-    ignore_value(read(rb->eventfd, &buf, sizeof(uint64_t)));
-    fcntl(rb->eventfd, F_SETFL, fd_flags);
-    */
+    int fd_flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fd_flags | O_NONBLOCK);
+    ignore_value(read(fd, &buf, sizeof(uint64_t)));
+    fcntl(fd, F_SETFL, fd_flags);
 }

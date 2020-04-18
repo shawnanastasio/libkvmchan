@@ -110,14 +110,22 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
                                      size_t size, uint8_t flags_mask, uint8_t direction,
                                      int in_efd, int out_efd);
 ringbuf_ret_t ringbuf_sec_write(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size);
+ringbuf_ret_t ringbuf_sec_write_stream(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size,
+                                       size_t *size_out);
 ringbuf_ret_t ringbuf_sec_read(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size);
+ringbuf_ret_t ringbuf_sec_read_stream(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size,
+                                      size_t *size_out);
+
+
+ringbuf_ret_t ringbuf_sec_available(ringbuf_t *priv, ringbuf_pub_t *pub, size_t *available_out);
+ringbuf_ret_t ringbuf_sec_free_space(ringbuf_t *priv, ringbuf_pub_t *pub, size_t *free_out);
 
 // Ringbuf I/O functions
 ringbuf_ret_t ringbuf_init(ringbuf_t *rb, void *start, size_t size, uint8_t flags, uint8_t direction,
                            int in_efd, int out_efd);
 ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
-int  ringbuf_get_eventfd(ringbuf_t *rb, ringbuf_pub_t *pub);
+int  ringbuf_get_eventfd(ringbuf_t *rb);
 void ringbuf_clear_eventfd(ringbuf_t *rb);
 
 extern const char *ringbuf_ret_names[];

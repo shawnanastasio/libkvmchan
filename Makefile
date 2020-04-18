@@ -16,6 +16,9 @@ TEST_DEPS:=$(TEST_SRCS:.c=.o)
 TEST_BIN:=test
 TEST_LIBS:=$(shell pkg-config --cflags --libs check)
 
+TEST_LIBRARY_SRCS:=test_library.c
+TEST_LIBRARY_BIN:=test_library
+
 CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wvla -fpic -fvisibility=hidden -std=gnu99 -I. \
 	   -fstack-protector-strong -D_FORITY_SOURCE=2
 
@@ -30,7 +33,7 @@ CFLAGS += -fstack-clash-protection
 endif
 
 
-.PHONY all: library daemon build_test
+.PHONY all: library daemon build_test $(TEST_LIBRARY_BIN)
 
 library: $(DEPS)
 	$(CC) -shared $(CFLAGS) $(DEPS) -o $(BIN) $(LIBS)
@@ -49,6 +52,9 @@ build_test: $(DEPS) $(TEST_DEPS)
 
 test: build_test
 	./$(TEST_BIN)
+
+$(TEST_LIBRARY_BIN): library
+	$(CC) $(CFLAGS) -fvisibility=default $(TEST_LIBRARY_SRCS)  -lkvmchan -L. -o $(TEST_LIBRARY_BIN) 
 
 clean:
 	rm -f $(DEPS)

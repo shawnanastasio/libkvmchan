@@ -30,25 +30,14 @@ struct libkvmchan;
 
 LIBKVMCHAN_EXPORTED struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t read_min,
                                                               size_t write_min);
-#if 0
-#define LIBKVM_FLAG_HOST (1 << 0)
-// A handle to an opened shared memory region.
-typedef struct libkvmchan_shm_handle {
-    void *shm; // Raw pointer to virtual memory region
-    size_t size; // Size of memory region
-} libkvmchan_shm_handle_t;
 
-// Struct representing an open libkvmchan instance. Opaque to user.
-typedef struct libkvmchan libkvmchan_t;
+LIBKVMCHAN_EXPORTED struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port);
 
-LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_posix(libkvmchan_shm_handle_t *handle, const char *name);
-LIBKVMCHAN_EXPORTED bool libkvmchan_shm_open_uio(libkvmchan_shm_handle_t *handle, const char *devname);
-LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_host_open(libkvmchan_shm_handle_t *handle);
-LIBKVMCHAN_EXPORTED libkvmchan_t *libkvmchan_client_open(libkvmchan_shm_handle_t *handle);
-LIBKVMCHAN_EXPORTED bool libkvmchan_write(libkvmchan_t *chan, const void *data, size_t size);
-LIBKVMCHAN_EXPORTED bool libkvmchan_read(libkvmchan_t *chan, void *out, size_t size);
-LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(libkvmchan_t *chan);
-LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(libkvmchan_t *chan);
-#endif
+LIBKVMCHAN_EXPORTED int libkvmchan_recv(struct libkvmchan *chan, void *data, size_t size);
+LIBKVMCHAN_EXPORTED int libkvmchan_send(struct libkvmchan *chan, void *data, size_t size);
+LIBKVMCHAN_EXPORTED int libkvmchan_read(struct libkvmchan *chan, void *data, size_t size);
+LIBKVMCHAN_EXPORTED int libkvmchan_write(struct libkvmchan *chan, void *data, size_t size);
+LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(struct libkvmchan *chan);
+LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(struct libkvmchan *chan);
 
 #endif // LIBKVMCHAN_H
