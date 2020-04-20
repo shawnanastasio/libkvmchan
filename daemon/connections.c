@@ -37,17 +37,25 @@
 
 static struct vec_voidp connections;
 
+static void connection_destructor(void *conn_) {
+    struct connection *conn = conn_;
+    close(conn->memfd);
+}
+
 bool connections_init(void) {
-    if (!vec_voidp_init(&connections, 10, NULL))
+    if (!vec_voidp_init(&connections, 10, connection_destructor))
         return false;
 
     return true;
 }
 
-struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port,
+                                          size_t *conn_i_out) {
     for (size_t i=0; i<connections.count; i++) {
         struct connection *cur = connections.data[i];
         if (cur->server.dom == server_dom && cur->client.dom == client_dom && cur->port == port) {
+            if (conn_i_out)
+                *conn_i_out = i;
             return cur;
         }
     }
@@ -121,7 +129,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     }
 
     // Make sure that there isn't already a vchan on this server/port
-    if (connections_get_by_dom(server_dom, client_dom, port)) {
+    if (connections_get_by_dom(server_dom, client_dom, port, NULL)) {
         log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
     }
@@ -203,6 +211,8 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     msg.cmd.command = LIBVIRT_IPC_CMD_ATTACH_IVSHMEM;
     msg.cmd.args[0] = (server_dom == 0) ? -1 : (int64_t)server_dom;
     msg.cmd.args[1] = (client_dom == 0) ? -1 : (int64_t)client_dom;
+    msg.cmd.args[2] = (int64_t)server_ivposition;
+    msg.cmd.args[3] = (int64_t)client_ivposition;
     msg.dest = IPC_DEST_LIBVIRT;
     msg.flags = IPC_FLAG_WANTRESP;
     if (!ipc_send_message(&msg, &resp)) {
@@ -259,7 +269,7 @@ fail:
  */
 bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 uint32_t *ivpos_out, pid_t *pid_out) {
-    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port);
+    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
     if (!conn) {
         log(LOGL_WARN, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
@@ -276,6 +286,70 @@ bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         *ivpos_out = conn->client.ivposition;
         *pid_out = conn->client.pid;
     }
+
+    return true;
+}
+
+/**
+ * Close an existing vchan.
+ *
+ * @param server_dom domain number of vchan's server
+ * @param client_dom domain number of vchan's client
+ * @param port       port number
+ * @return           success?
+ */
+bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+    size_t conn_i;
+    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, &conn_i);
+    if (!conn) {
+        log(LOGL_WARN, "Tried to close non-existent vchan at dom %"PRIu32" port %"PRIu32,
+            server_dom, port);
+        return false;
+    }
+
+    // Disconnect ivshmem device from VMs with libvirt
+    struct ipc_message resp, msg = {
+        .type = IPC_TYPE_CMD,
+        .cmd = {
+            .command = LIBVIRT_IPC_CMD_DETACH_IVSHMEM,
+            .args = {
+                (conn->server.dom == 0) ? -1 : (int64_t)conn->server.dom,
+                (conn->client.dom == 0) ? -1 : (int64_t)conn->client.dom,
+                (int64_t)conn->server.ivposition,
+                (int64_t)conn->client.ivposition,
+            }
+        },
+        .dest = IPC_DEST_LIBVIRT,
+        .flags = IPC_FLAG_WANTRESP,
+    };
+    if (!ipc_send_message(&msg, &resp)) {
+        log(LOGL_ERROR, "Failed to send IPC message to libvirt: %m.");
+        return false;
+    }
+    if (resp.resp.error) {
+        log(LOGL_ERROR, "libvirt failed to detach ivshmem devices!");
+        return false;
+    }
+
+    // Unregister connections with ivshmem
+    msg.cmd.command = IVSHMEM_IPC_CMD_UNREGISTER_CONN;
+    msg.cmd.args[0] = conn->server.pid;
+    msg.cmd.args[0] = conn->client.pid;
+    msg.cmd.args[0] = conn->server.ivposition;
+    msg.cmd.args[0] = conn->client.ivposition;
+    msg.dest = IPC_DEST_IVSHMEM;
+    msg.flags = IPC_FLAG_WANTRESP;
+    if (!ipc_send_message(&msg, &resp)) {
+        log(LOGL_ERROR, "Failed to send IPC message to ivshmem: %m.");
+        return false;
+    }
+    if (resp.resp.error) {
+        log(LOGL_ERROR, "ivshmem failed to unregister connections!\n");
+        return false;
+    }
+
+    // Finally, delete the connection from our local list
+    vec_voidp_remove(&connections, conn_i);
 
     return true;
 }

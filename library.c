@@ -70,6 +70,12 @@ struct libkvmchan {
     // Size of shared memory region
     size_t shm_size;
 
+    // Domain number of peer
+    uint32_t peer_dom;
+
+    // Port of vchan
+    uint32_t port;
+
     // Private ring buffer control structures
     ringbuf_t host_to_client_rb;
     ringbuf_t client_to_host_rb;
@@ -288,7 +294,8 @@ struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t
     if (!ret)
         goto out;
     ret->flags = KVMCHAN_FLAG_SERVER;
-
+    ret->peer_dom = domain;
+    ret->port = port;
 
     // Send request to kvmchand
     int fds[KVMCHAND_FD_MAX];
@@ -382,6 +389,8 @@ struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port) {
     if (!ret)
         goto out;
     ret->flags = 0;
+    ret->peer_dom = domain;
+    ret->port = port;
 
     // Send request to kvmchand
     int fds[KVMCHAND_FD_MAX];
@@ -588,4 +597,51 @@ void libkvmchan_clear_eventfd(struct libkvmchan *chan) {
     } else {
         return ringbuf_clear_eventfd(&chan->host_to_client_rb);
     }
+}
+
+/**
+ * Close an existing connection.
+ *
+ * @param chan connection to close
+ */
+bool libkvmchan_close(struct libkvmchan *chan) {
+    bool ret = false;
+
+    if ((errno = pthread_mutex_lock(&g_state.mutex)))
+        return NULL;
+    if (!(g_state.flags & STATE_FLAG_CONNECTED)) {
+        if (!connect_to_daemon(&g_state))
+            goto out;
+    }
+
+    // Close ringbufs
+    ringbuf_close(&chan->host_to_client_rb);
+    ringbuf_close(&chan->client_to_host_rb);
+
+    // Unmap shm
+    if (munmap(chan->shm, chan->shm_size) < 0)
+        goto out;
+
+    if (chan->flags & KVMCHAN_FLAG_SERVER) {
+        // Send message to daemon to close the connection
+        struct kvmchand_ret kret;
+        struct kvmchand_message msg = {
+            .command = KVMCHAND_CMD_CLOSE,
+            .args = {
+                chan->peer_dom,
+                chan->port,
+            },
+        };
+        if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+            goto out;
+        if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL) < 0)
+            goto out;
+    }
+
+    ret = true;
+out:
+    // free chan struct
+    free(chan);
+
+    return ret;
 }

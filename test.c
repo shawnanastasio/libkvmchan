@@ -321,7 +321,7 @@ void *ringbuf_eventfd_test_host_thread(void *rb) {
 
 void *ringbuf_eventfd_test_client_thread(void *rb) {
     // Wait for the eventfd to signal available bytes
-    int fd = ringbuf_get_eventfd(rb, NULL);
+    int fd = ringbuf_get_eventfd(rb);
     if (fd < 0)
         return "Failed to obtain eventfd!";
 

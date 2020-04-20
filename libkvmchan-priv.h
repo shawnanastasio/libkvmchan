@@ -95,6 +95,13 @@ struct kvmchand_message {
      */
 #define KVMCHAND_CMD_GET_CONN_FDS 3
 
+    /**
+     * Close an existing vchan.
+     * arg0 (u32) - domain # of client
+     * arg1 (u32) - port
+     */
+#define KVMCHAND_CMD_CLOSE 4
+
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
 

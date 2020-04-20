@@ -105,6 +105,16 @@ struct ipc_message {
  */
 #define MAIN_IPC_CMD_VCHAN_CONN 1
 
+/**
+ * Destroy an existing vchan.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of client
+ * args[2] - (u32) port
+ *
+ * resp.error - error?
+ */
+#define MAIN_IPC_CMD_VCHAN_CLOSE 2
+
 // libvirt process commands
 
 /**
@@ -129,17 +139,30 @@ struct ipc_message {
  * Attach a new ivshmem device to the given domain IDs.
  * args[0] - (u32) domain ID or -1
  * args[1] - (u32) domain ID or -1
+ * args[2] - (u32) ivposition for domain 0
+ * args[3] - (u32) ivposition for domain 1
  *
- * resp.ret - (u8) (!!error1 << 1) | !!error0
+ * resp.ret  - (u8) (!!error1 << 1) | !!error0
  */
 #define LIBVIRT_IPC_CMD_ATTACH_IVSHMEM 2
+
+/**
+ * Detach a new ivshmem device from the given domain IDs.
+ * args[0] - (u32) domain ID or -1
+ * args[1] - (u32) domain ID or -1
+ * args[2] - (u32) ivposition for domain 0
+ * args[3] - (u32) ivposition for domain 1
+ *
+ * resp.ret  - (u8) (!!error1 << 1) | !!error0
+ */
+#define LIBVIRT_IPC_CMD_DETACH_IVSHMEM 3
 
 // ivshmem process commands
 
 /**
  * Register a new upcomming connection with ivshmem.
- * args[0] - (pid_t) QEMU pid that will soon connect, or -1
- * args[1] - (pid_t) Another QEMU pid that will soon connect, or -1
+ * args[0] - (pid_t) QEMU pid that will soon connect, or 0
+ * args[1] - (pid_t) Another QEMU pid that will soon connect, or 0
  * fds[0] - memfd backing shared storage
  *
  * resp.error - error?
@@ -166,6 +189,17 @@ struct ipc_message {
  * fds[4] - outgoing eventfd 1
  */
 #define IVSHMEM_IPC_CMD_GET_CONN_FDS 1
+
+/**
+ * Unregister existing connections.
+ * args[0] - (pid_t) QEMU pid of first connection, or 0
+ * args[1] - (pid_t) QEM pid of second connecton, or 0
+ * args[2] - (u32) ivposition of first conection
+ * args[3] - (u32) ivposition of second conection
+ *
+ * resp.error - error?
+ */
+#define IVSHMEM_IPC_CMD_UNREGISTER_CONN 2
 
 // VFIO process commands
 

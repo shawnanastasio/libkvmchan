@@ -252,6 +252,9 @@ static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivpo
  * @return        allocated ivposition, or 0 on failure
  */
 static uint32_t client_allocate_ivposition(struct client_info *client) {
+    if (client->ivpositions.count == (0xFFFFFFFF) - 2)
+        return 0;
+
     // Keep incrementing ivposition_last until we have a free ivposition
     for (;;) {
         // Handle overflow, skipping over 0 and 1 (reserved)
@@ -317,7 +320,6 @@ fail:
 }
 
 static bool handle_kvmchand_message(struct client_info *client, struct conn_info *conn) {
-    log(LOGL_INFO, "Received kvmchand message from guest!"); //sponge
     struct kvmchand_message msg;
     if (RB_SUCCESS != ringbuf_sec_read(&conn->data.client_to_host_rb, &conn->data.hdr->client_to_host_pub,
                                        &msg, sizeof(struct kvmchand_message))) {
@@ -386,6 +388,31 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
 
             ret.error = ipc_resp.resp.error;
             ret.ret = ipc_resp.resp.ret;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_CLOSE:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_CLOSE,
+                    .args = {
+                        dom,
+                        msg.args[0],
+                        msg.args[1]
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
 
             break;
         }
@@ -609,7 +636,7 @@ fail:
     return false;
 }
 
-static bool remove_connection(struct ivshmem_server *server, int fd) {
+static bool remove_connection_by_fd(struct ivshmem_server *server, int fd) {
     // Get client info by pid
     socklen_t len = sizeof(struct ucred);
     struct ucred cred;
@@ -622,7 +649,7 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
         return false;
 
     bool found_conn = false;
-    int conn_i;
+    size_t conn_i;
     for (size_t i=0; i<client->connections.count; i++) {
         struct conn_info *conn = client->connections.data[i];
         if (conn->socfd == fd) {
@@ -639,6 +666,31 @@ static bool remove_connection(struct ivshmem_server *server, int fd) {
     // If no connections left, remove client
     if (client->connections.count == 0)
         vec_voidp_remove(&server->clients, client_i);
+
+    return true;
+}
+
+static bool remove_connection_by_ivpos(struct ivshmem_server *server, pid_t pid,
+                                       uint32_t ivposition) {
+
+    struct client_info *client = get_client(server, pid, false, NULL);
+    if (!client)
+        return false;
+
+    bool found_conn = false;
+    size_t conn_i;
+    for (size_t i=0; i<client->connections.count; i++) {
+        struct conn_info *conn = client->connections.data[i];
+        if (conn->ivposition == ivposition) {
+            found_conn = true;
+            conn_i = i;
+            break;
+        }
+    }
+    if (!found_conn)
+        return false;
+
+    vec_voidp_remove(&client->connections, conn_i);
 
     return true;
 }
@@ -716,6 +768,23 @@ static void handle_ipc_message(struct ipc_message *msg) {
                 response.flags = IPC_FLAG_FD;
             }
 
+            break;
+        }
+
+        case IVSHMEM_IPC_CMD_UNREGISTER_CONN:
+        {
+            bool success[2] = {true, true};
+            for (uint8_t i=0; i<2; i++) {
+                pid_t pid = (pid_t)cmd->args[i];
+                uint32_t ivposition = (uint32_t)cmd->args[i + 2];
+
+                if (pid <= 0)
+                    continue;
+
+                success[i] = remove_connection_by_ivpos(&g_server, pid, ivposition);
+            }
+
+            response.resp.error = !success[0] || !success[1];
             break;
         }
 
@@ -807,7 +876,7 @@ void run_ivshmem_loop(int mainsoc) {
                 }
 
                 // Remove connection
-                if (!remove_connection(&g_server, fd)) {
+                if (!remove_connection_by_fd(&g_server, fd)) {
                     log(LOGL_ERROR, "Failed to remove connection data!");
                     goto error;
                 }

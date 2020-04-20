@@ -127,6 +127,7 @@ ringbuf_ret_t ringbuf_write(ringbuf_t *rb, const void *data, size_t size);
 ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size);
 int  ringbuf_get_eventfd(ringbuf_t *rb);
 void ringbuf_clear_eventfd(ringbuf_t *rb);
+void ringbuf_close(ringbuf_t *rb);
 
 extern const char *ringbuf_ret_names[];
 

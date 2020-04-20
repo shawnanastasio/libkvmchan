@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -135,6 +135,10 @@ struct vfio_connection {
     int incoming_eventfds[NUM_EVENTFDS];
     int outgoing_eventfds[NUM_EVENTFDS];
 
+    // REQ eventfd. Used by VFIO to signal to userspace
+    // that a device is being unplugged.
+    int req_eventfd;
+
     /**
      * Outgoing eventfds need to be emulated using
      * a pthread that polls on the eventfds and
@@ -161,8 +165,11 @@ struct vfio_data {
     struct vec_voidp connections;
 };
 
-struct vfio_data *g_vfio_data = NULL;
-struct vec_voidp *g_ivshmem_devices = NULL;
+static struct vfio_data *g_vfio_data = NULL;
+static struct vec_voidp *g_ivshmem_devices = NULL;
+
+// Epoll object for all VFIO PCI REQ fds
+static int req_epollfd;
 
 static void vfio_conn_free_eventfds(struct vfio_connection *conn);
 
@@ -180,24 +187,20 @@ skip_comma:
     printf("}\n");
 }
 
-#if 0
 static void connection_destructor(void *conn_) {
-    struct vfio_host_connection *conn = conn_;
+    struct vfio_connection *conn = conn_;
 
-    if (munmap(conn->bar0, sizeof(struct ivshmem_bar0)) < 0)
-        goto fail;
-
-    if (munmap(conn->shared, conn->shared_size) < 0)
+    if (munmap((void *)conn->bar0, sizeof(struct ivshmem_bar0)) < 0)
         goto fail;
 
     vfio_conn_free_eventfds(conn);
+    close(conn->device_fd);
 
     return;
 
 fail:
     log(LOGL_ERROR, "Failed to free connection: %m. Potential resource leak.");
 }
-#endif
 
 #ifdef USE_VFIO_NOIOMMU
 static bool vfio_noiommu_is_enabled(void) {
@@ -650,6 +653,25 @@ static bool vfio_conn_get_eventfds(struct vfio_connection *conn) {
     if (pthread_create(&conn->outgoing_thread, NULL, outgoing_thread, conn))
         goto fail_outgoing_thread_kill_eventfd;
 
+    // Allocate and request req_eventfd
+    conn->req_eventfd = eventfd(0, 0);
+    irqset->argsz = sizeof(struct vfio_irq_set) + sizeof(int) * 1;
+    irqset->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+    irqset->index = VFIO_PCI_REQ_IRQ_INDEX;
+    irqset->start = 0;
+    irqset->count = 1;
+    ((int *)irqset->data)[0] = conn->req_eventfd;
+
+    if (ioctl(conn->device_fd, VFIO_DEVICE_SET_IRQS, irqset_buf) < 0) {
+        log(LOGL_WARN, "Failed to register req_eventfd for device: %m. Ignoring.\n");
+        close(conn->req_eventfd);
+        conn->req_eventfd = -1;
+    } else {
+        // Add req_eventfd to global epoll object
+        if (add_epoll_fd(req_epollfd, conn->req_eventfd, EPOLLIN) < 0)
+            log(LOGL_WARN, "Failed to register req_eventfd with epoll: %m.\n");
+    }
+
     return true;
 
 fail_outgoing_thread_kill_eventfd:
@@ -672,6 +694,7 @@ fail:
 static void vfio_conn_free_eventfds(struct vfio_connection *conn) {
     for (size_t i=0; i<NUM_EVENTFDS; i++)
         close(conn->incoming_eventfds[i]);
+    close(conn->req_eventfd);
 
     // Notify kill eventfd
     uint64_t buf = 1;
@@ -903,7 +926,7 @@ static bool vfio_init(struct vfio_data *data, struct vec_voidp *ivshmem_devices,
 #endif
 
     // Construct vector of connections
-    if (!vec_voidp_init(&data->connections, 10, NULL))
+    if (!vec_voidp_init(&data->connections, 10, connection_destructor))
         goto fail_group_open;
 
     // Flush data and connect to host daemon
@@ -997,14 +1020,32 @@ static void handle_ipc_message(struct ipc_message *msg) {
             log_BUG("Unknown IPC command received in ivshmem loop: %"PRIu64, cmd->command);
     }
 
-out:
     if (msg->flags & IPC_FLAG_WANTRESP) {
         if (!ipc_send_message(&response, NULL))
             log_BUG("Unable to send response to IPC message!");
     }
 }
 
+static struct vfio_connection *get_conn_by_req_eventfd(struct vfio_data *data, int fd, size_t *conn_i_out) {
+    for (size_t i=0; i<data->connections.count; i++) {
+        struct vfio_connection *cur = data->connections.data[i];
+        if (cur->req_eventfd == fd) {
+            if (conn_i_out)
+                *conn_i_out = i;
+
+            return cur;
+        }
+    }
+
+    return NULL;
+}
+
 void run_vfio_loop(int mainsoc) {
+    if ((req_epollfd = epoll_create1(0)) < 0) {
+        log(LOGL_ERROR, "Failed to create epollfd: %m!");
+        return;
+    }
+
     if (!ipc_start(mainsoc, IPC_DEST_VFIO, handle_ipc_message)) {
         log(LOGL_ERROR, "Failed to start IPC threads: %m!");
         return;
@@ -1070,8 +1111,36 @@ void run_vfio_loop(int mainsoc) {
         goto error;
     g_vfio_data = &vfio;
 
-    // TODO: add a heartbeat check to ensure that the dom0 daemon is still running
-    for(;;) usleep(1000);
+    // Epoll loop to check for disconnected devices
+    struct epoll_event events[5];
+    int event_count;
+    for (;;) {
+        event_count = epoll_wait(req_epollfd, events, ARRAY_SIZE(events), -1);
+        for (int i=0; i<event_count; i++) {
+            int fd = events[i].data.fd;
+            log(LOGL_INFO, "VFIO requesting ivshmem detach. fd: %d", fd);
+
+            // This device is going to be removed.
+            // For now, simply destroy our local data for it and acknowledge the
+            // request. Eventually, we may want to take some other action, like
+            // send a signal to all clients who are using the device.
+            uint64_t buf;
+            ignore_value(read(fd, &buf, sizeof(buf)));
+
+            // Remove the fd from epoll
+            if (epoll_ctl(req_epollfd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+                log(LOGL_ERROR, "Failed to delete req fd: %m.");
+                goto error;
+            }
+
+            // Remove connection
+            size_t conn_i;
+            struct vfio_connection *cur_conn = get_conn_by_req_eventfd(&vfio, fd, &conn_i);
+            ASSERT(cur_conn);
+
+            vec_voidp_remove(&vfio.connections, conn_i);
+        }
+    }
 
 error:
     log(LOGL_ERROR, "Vfio loop encountered fatal error: %m!");

@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -61,9 +61,21 @@ struct domain_info {
     uint32_t index_last;    // Last allocated PCI device index
 };
 
+struct cleanup_action {
+    union cleanup_arg {
+        void *ptr;
+        uint32_t u32;
+    } args[2];
+    bool (*cleanup_func)(union cleanup_arg arg1, union cleanup_arg arg2);
+};
+
 // Vec of domain_info structs for currently running domains
 static struct vec_voidp running_domains;
 static sem_t running_domains_sem;
+
+// Vec of cleanup actions that need to be attemped periodically
+static struct vec_voidp cleanup_queue;
+static sem_t cleanup_queue_sem;
 
 // libvirt connection
 static virConnectPtr conn;
@@ -135,45 +147,6 @@ static bool get_info_by_domain_id(uint32_t id, struct domain_info **info_out) {
 out:
     ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
     return ret;
-}
-
-/**
- * Allocate a PCI index for a domain.
- * @param client  domain to allocate index for
- * @return        allocated index, or 0 on failure
- */
-static uint32_t domain_allocate_pci_index(struct domain_info *domain) {
-    // Keep incrementing index_last until we have a free index
-    for (;;) {
-        // Handle overflow, skipping over 0 (reserved)
-        if (domain->index_last == 0xFFFFFFFF)
-            domain->index_last = 0;
-
-        domain->index_last++;
-        if (!vec_u32_contains(&domain->indices, domain->index_last, NULL)) {
-            vec_u32_push_back(&domain->indices, domain->index_last);
-            return domain->index_last;
-        }
-    }
-
-    return 0;
-}
-
-/**
- * Free a previously allocated PCI index.
- * @param client     domain that index was allocated for
- * @param index index to free
- */
-static void domain_free_pci_index(struct domain_info *domain, uint32_t index) {
-    for (size_t i=0; i<domain->indices.count; i++) {
-        if (domain->indices.data[i] == index) {
-            domain->index_last = i - 1;
-            vec_u32_remove(&domain->indices, i);
-            return;
-        }
-    }
-
-    log_BUG("Tried to free PCI index that wasn't allocated!\n");
 }
 
 static void print_running_domains(virConnectPtr conn) {
@@ -343,28 +316,120 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, uint32_t i
     free(result);
 
     return true;
+}
 
+/**
+ * Callback that the main event loop can keep trying to call to
+ * remove a chardev from a previously removed ivshmem device.
+ *
+ * Since it takes a while for the chardev to free up after removing
+ * the ivshmem device, we have to keep trying this periodically until
+ * it succeeds.
+ */
+bool chardev_cleanup_callback(union cleanup_arg dom_, union cleanup_arg index_) {
+    virDomainPtr dom = dom_.ptr;
+    uint32_t index = index_.u32;
+
+    // A QMP command to remove an existing chardev with format %d (index)
+    const char qmp_del_chardev_format[] = "{\"execute\": \"chardev-remove\","
+        "\"arguments\" : {\"id\": \"charshmem%d\"}}";
+
+    char chardev_buf[sizeof(qmp_del_chardev_format) + 16];
+    snprintf(chardev_buf, sizeof(chardev_buf), qmp_del_chardev_format, index);
+
+    // Try to remove the character device
+    char *result;
+    if (virDomainQemuMonitorCommand(dom, chardev_buf, &result, 0) < 0) {
+        log(LOGL_ERROR, "Failed to remove chardev from dom: %s", result);
+        free(result);
+        return false;
+    }
+    if (!strstr(result, "\"return\":{}")) {
+        log(LOGL_ERROR, "QEMU rejected chardev removal: %s", result);
+        free(result);
+        return false;
+    }
+    free(result);
+
+    return true;
+}
+
+
+/**
+ * Remove an ivshmem device from a given domain
+ * @param dom   domain to remove ivshmem device from
+ * @param index index of ivshmem device to remove
+ * @return success?
+ */
+static bool detach_ivshmem_device(virDomainPtr dom, uint32_t index) {
+    // A QMP command to remove an existing ivshmem device with format %d (index)
+    const char qmp_del_ivshmem_format[] = "{\"execute\": \"device_del\","
+        "\"arguments\" : {\"id\": \"shmem%d\"}}";
+
+    // Fill in arguments
+    char ivshmem_buf[sizeof(qmp_del_ivshmem_format) + 16];
+    snprintf(ivshmem_buf, sizeof(ivshmem_buf), qmp_del_ivshmem_format, index);
+
+    // Remove ivshmem device
+    char *result;
+    if (virDomainQemuMonitorCommand(dom, ivshmem_buf, &result, 0) < 0) {
+        log(LOGL_ERROR, "Failed to remove ivshmem from dom: %s", result);
+        free(result);
+        return false;
+    }
+    if (!strstr(result, "\"return\":{}")) {
+        log(LOGL_ERROR, "QEMU rejected ivshmem removal: %s", result);
+        free(result);
+        return false;
+    }
+    free(result);
+
+    // Queue up chardev cleanup
+    struct cleanup_action *cleanup = malloc_w(sizeof(struct cleanup_action));
+    cleanup->args[0].ptr = dom;
+    cleanup->args[1].u32 = index;
+    cleanup->cleanup_func = chardev_cleanup_callback;
+
+    ASSERT(HANDLE_EINTR(sem_wait(&cleanup_queue_sem)) == 0);
+    vec_voidp_push_back(&cleanup_queue, cleanup);
+    ASSERT(HANDLE_EINTR(sem_post(&cleanup_queue_sem)) == 0);
+
+    return true;
 }
 
 /**
  * Attach an ivshmem device to the given domain ID.
+ * The provided ivposition will be used as the index for the
+ * new pci and character devices.
  */
-bool attach_ivshmem_by_id(uint32_t id) {
+static bool attach_ivshmem_by_id(uint32_t dom_id, uint32_t ivposition) {
     // Lookup domain by ID
     struct domain_info *info = NULL;
-    if (!get_info_by_domain_id(id, &info))
+    if (!get_info_by_domain_id(dom_id, &info))
         return false;
 
     virDomainPtr dom = virDomainLookupByUUIDString(conn, info->uuid_str);
     if (!dom)
         return false;
 
-    // Allocate PCI index and attach device
-    uint32_t index = domain_allocate_pci_index(info);
-    if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, index)) {
-        domain_free_pci_index(info, index);
+    if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, ivposition))
         return false;
-    }
+
+    return true;
+}
+
+static bool detach_ivshmem_by_id(uint32_t dom_id, uint32_t ivposition) {
+    // Lookup domain by ID
+    struct domain_info *info = NULL;
+    if (!get_info_by_domain_id(dom_id, &info))
+        return false;
+
+    virDomainPtr dom = virDomainLookupByUUIDString(conn, info->uuid_str);
+    if (!dom)
+        return false;
+
+    if (!detach_ivshmem_device(dom, ivposition))
+        return false;
 
     return true;
 }
@@ -551,8 +616,11 @@ static void handle_ipc_message(struct ipc_message *msg) {
                 if (cmd->args[i] == -1)
                     continue;
 
-                if (!attach_ivshmem_by_id((uint32_t)cmd->args[i])) {
-                    log(LOGL_ERROR, "Failed to attach ivshmem to id %d!", (uint32_t)cmd->args[i]);
+                uint32_t domain = (uint32_t)cmd->args[i];
+                uint32_t ivposition = (uint32_t)cmd->args[i+2];
+
+                if (!attach_ivshmem_by_id(domain, ivposition)) {
+                    log(LOGL_ERROR, "Failed to attach ivshmem to id %d!", domain);
                     errors[i] = true;
                 }
             }
@@ -561,6 +629,30 @@ static void handle_ipc_message(struct ipc_message *msg) {
             response.resp.error = errors[0] || errors[1];
             response.resp.ret = (!!errors[1] << 1) | !!errors[0];
 
+            break;
+        }
+
+        case LIBVIRT_IPC_CMD_DETACH_IVSHMEM:
+        {
+            bool errors[2] = {false};
+
+            // We were passed up to 2 domains
+            for (uint8_t i=0; i<2; i++) {
+                // Skip -1
+                if (cmd->args[i] == -1)
+                    continue;
+
+                uint32_t domain = (uint32_t)cmd->args[i];
+                uint32_t ivposition = (uint32_t)cmd->args[i+2];
+
+                if (!detach_ivshmem_by_id(domain, ivposition)) {
+                    log(LOGL_ERROR, "Failed to detach ivshmem from id %d!", domain);
+                    errors[i] = true;
+                }
+            }
+
+            response.resp.error = errors[0] || errors[1];
+            response.resp.ret = (!!errors[1] << 1) | !!errors[0];
             break;
         }
 
@@ -576,6 +668,11 @@ static void handle_ipc_message(struct ipc_message *msg) {
 
 void run_libvirt_loop(int mainsoc, const char *host_uri) {
     if (!ipc_start(mainsoc, IPC_DEST_LIBVIRT, handle_ipc_message))
+        goto error;
+
+    if (!vec_voidp_init(&cleanup_queue, 10, free_destructor))
+        goto error;
+    if (sem_init(&cleanup_queue_sem, 0, 1) < 0)
         goto error;
 
     // Initialize libvirt API
@@ -616,15 +713,11 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
 
     // Establish initial list of running domains
     int n_domains = virConnectNumOfDomains(conn);
-    if (!vec_voidp_init(&running_domains, n_domains, free_destructor)) {
-        log(LOGL_ERROR, "Failed to allocate memory!");
+    if (!vec_voidp_init(&running_domains, n_domains, free_destructor))
         goto error;
-    }
 
-    if (sem_init(&running_domains_sem, 0, 1) < 0) {
-        log(LOGL_ERROR, "Failed to init semaphore: %m");
+    if (sem_init(&running_domains_sem, 0, 1) < 0)
         goto error;
-    }
 
     if (n_domains > 0) {
         int *domains = calloc(n_domains, sizeof(int));
@@ -678,11 +771,23 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
 
     // libvirt event loop
     for(;;) {
-        print_running_domains(conn);
+        //print_running_domains(conn);
         if (virEventRunDefaultImpl() < 0) {
             log(LOGL_ERROR, "Failed to run event loop: %s",
                     virGetLastErrorMessage());
         }
+
+        // Run cleanup actions
+        ASSERT(HANDLE_EINTR(sem_wait(&cleanup_queue_sem)) == 0);
+        size_t i = cleanup_queue.count;
+        while (i-- > 0) {
+            struct cleanup_action *cur = cleanup_queue.data[i];
+            if (cur->cleanup_func(cur->args[0], cur->args[1])) {
+                // Cleanup succeeded, remove this action from the queue
+                vec_voidp_remove(&cleanup_queue, i);
+            }
+        }
+        ASSERT(HANDLE_EINTR(sem_post(&cleanup_queue_sem)) == 0);
     }
 
 error:

@@ -57,13 +57,16 @@ typedef int (*read_func_t)(struct libkvmchan *chan, void *data, size_t size);
 typedef int (*write_func_t)(struct libkvmchan *chan, void *data, size_t size);
 
 void do_test(bool client, int domain_no, int port_no, read_func_t read_func, write_func_t write_func) {
+    const size_t num_runs = 10;
+    struct libkvmchan *chan;
+
     if (client) {
-        struct libkvmchan *chan = libkvmchan_client_init(domain_no, port_no);
+        chan = libkvmchan_client_init(domain_no, port_no);
         if (!chan)
             perror_e("libkvmchan_client_init");
 
         // Keep sending hello (u32 len, string)
-        for(;;) {
+        for(size_t i=0; i<num_runs; i++) {
             char *hello_str = "Hello, libkvmchan server!";
             size_t hello_len = strlen(hello_str);
 
@@ -78,14 +81,14 @@ void do_test(bool client, int domain_no, int port_no, read_func_t read_func, wri
         }
 
     } else {
-        struct libkvmchan *chan = libkvmchan_server_init(domain_no, port_no, 100, 100);
+        chan = libkvmchan_server_init(domain_no, port_no, 100, 100);
         if (!chan)
             perror_e("libkvmchan_server_init");
 
         // Wait for messages from client and print them out
         char str_buf[256];
         size_t len_buf;
-        for (;;) {
+        for (size_t i=0; i<num_runs; i++) {
             int fd = libkvmchan_get_eventfd(chan);
             if (fd < 0)
                 perror_e("libkvmchan_get_eventfd");
@@ -107,6 +110,10 @@ void do_test(bool client, int domain_no, int port_no, read_func_t read_func, wri
             usleep(1 * 1000 * 1000);
         }
     }
+
+    printf("Done. Closing vchan.\n");
+    if (!libkvmchan_close(chan))
+        perror_e("libkvmchan_close");
 }
 
 int main(int argc, char **argv) {

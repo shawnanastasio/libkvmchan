@@ -642,3 +642,9 @@ void ringbuf_clear_eventfd(ringbuf_t *rb) {
     ignore_value(read(fd, &buf, sizeof(uint64_t)));
     fcntl(fd, F_SETFL, fd_flags);
 }
+
+void ringbuf_close(ringbuf_t *rb) {
+    close(rb->incoming_eventfd);
+    if (!(rb->flags & RINGBUF_DIRECTION_LOCAL))
+        close(rb->outgoing_eventfd);
+}

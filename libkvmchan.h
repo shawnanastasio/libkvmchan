@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -39,5 +39,6 @@ LIBKVMCHAN_EXPORTED int libkvmchan_read(struct libkvmchan *chan, void *data, siz
 LIBKVMCHAN_EXPORTED int libkvmchan_write(struct libkvmchan *chan, void *data, size_t size);
 LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(struct libkvmchan *chan);
+LIBKVMCHAN_EXPORTED bool libkvmchan_close(struct libkvmchan *chan);
 
 #endif // LIBKVMCHAN_H
