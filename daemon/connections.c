@@ -334,9 +334,9 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     // Unregister connections with ivshmem
     msg.cmd.command = IVSHMEM_IPC_CMD_UNREGISTER_CONN;
     msg.cmd.args[0] = conn->server.pid;
-    msg.cmd.args[0] = conn->client.pid;
-    msg.cmd.args[0] = conn->server.ivposition;
-    msg.cmd.args[0] = conn->client.ivposition;
+    msg.cmd.args[1] = conn->client.pid;
+    msg.cmd.args[2] = conn->server.ivposition;
+    msg.cmd.args[3] = conn->client.ivposition;
     msg.dest = IPC_DEST_IVSHMEM;
     msg.flags = IPC_FLAG_WANTRESP;
     if (!ipc_send_message(&msg, &resp)) {
