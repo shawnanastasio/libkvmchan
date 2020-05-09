@@ -229,7 +229,7 @@ struct ipc_message {
  */
 #define VFIO_IPC_CMD_GET_CONN_FDS 1
 
-void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
+void ipc_server_start(int socfds[NUM_IPC_SOCKETS],
                       void (*message_handler)(struct ipc_message *));
 bool ipc_start(int socfd, uint8_t src, void (*message_handler)(struct ipc_message *));
 bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response);

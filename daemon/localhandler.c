@@ -93,9 +93,6 @@ static void client_destructor(void *client_) {
         if (!handle_client_message(client, &msg))
             log(LOGL_ERROR, "Failed to send cleanup message: %m. Potential resource leak");
     }
-    if (client->servers.count > 0)
-        log(LOGL_ERROR, "Unable to close all vchans for client. Potential resource leak.");
-
 
     // Delete server vec
     vec_voidp_destroy(&client->servers);
@@ -103,7 +100,7 @@ static void client_destructor(void *client_) {
     free(client);
 }
 
-struct client *get_client_by_fd(struct localhandler_data *data, int fd) {
+static struct client *get_client_by_fd(struct localhandler_data *data, int fd) {
     for (size_t i=0; i<data->clients.count; i++) {
         struct client *cur = data->clients.data[i];
         if (cur->fd == fd)
@@ -117,14 +114,14 @@ struct client *get_client_by_fd(struct localhandler_data *data, int fd) {
  * Hooks for recording server creation/destruction so that vchans can be
  * automatically cleaned up when client disconnects
  */
-void record_serverinit(struct client *client, struct kvmchand_message *msg) {
+static void record_serverinit(struct client *client, struct kvmchand_message *msg) {
     struct server *server = malloc_w(sizeof(struct server));
     server->client_dom = msg->args[0];
     server->port = msg->args[1];
     ASSERT(vec_voidp_push_back(&client->servers, server));
 }
 
-void record_close(struct client *client, struct kvmchand_message *msg) {
+static void record_close(struct client *client, struct kvmchand_message *msg) {
     uint32_t client_dom = msg->args[0];
     uint32_t port = msg->args[1];
 
@@ -136,6 +133,8 @@ void record_close(struct client *client, struct kvmchand_message *msg) {
             return;
         }
     }
+    log(LOGL_INFO, "Recorded close for non-existent connection? cfd: %d, cdom: %u, port: %u",
+        client->fd, client_dom, port);
 }
 
 
@@ -270,6 +269,10 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
     struct kvmchand_ret ret = { .error = true };
     int fds[KVMCHAND_FD_MAX];
 
+    // Initialize fds to -1 to avoid clang scan-build warning
+    for (size_t i=0; i<KVMCHAND_FD_MAX; i++)
+        fds[i] = -1;
+
     /**
      * If we're not in dom 0, the only way we can meaningfully service
      * requests is to defer them to the kvmchand server on dom0.
@@ -351,6 +354,10 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
     int fd = client->fd;
     struct kvmchand_ret ret = { .error = true };
     int fds[KVMCHAND_FD_MAX];
+
+    // Initialize fds to -1 to avoid clang scan-build warning
+    for (size_t i=0; i<KVMCHAND_FD_MAX; i++)
+        fds[i] = -1;
 
     switch(msg->command) {
         case KVMCHAND_CMD_HELLO:

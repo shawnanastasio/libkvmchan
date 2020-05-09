@@ -561,7 +561,7 @@ fail_errno:
  * @param src              IPC_DEST_* that corresponds to this process
  * @param message_handler  handler for received non-response, non-forwarded messages
  */
-void ipc_server_start(int socfds[NUM_IPC_SOCKETS], uint8_t src,
+void ipc_server_start(int socfds[NUM_IPC_SOCKETS],
                       void (*message_handler)(struct ipc_message *)) {
     if (!dispatcher_data_init(&g_ipc_data.dispatcher_data, true, -1, socfds))
         goto fail;

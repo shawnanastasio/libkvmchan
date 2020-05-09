@@ -357,7 +357,7 @@ static void host_main(void) {
     sockets[IPC_SOCKET_LIBVIRT] = main_libvirt_sv[0];
     sockets[IPC_SOCKET_LOCALHANDLER] = main_localhandler_sv[0];
 
-    ipc_server_start(sockets, IPC_DEST_MAIN, handle_message);
+    ipc_server_start(sockets, handle_message);
 
 fail_errno:
     log(LOGL_ERROR, "Error encountered while initializing daemon: %m");
@@ -418,7 +418,7 @@ static void guest_main(void) {
     sockets[IPC_SOCKET_VFIO] = main_vfio_sv[0];
     sockets[IPC_SOCKET_LOCALHANDLER] = main_localhandler_sv[0];
 
-    ipc_server_start(sockets, IPC_DEST_MAIN, handle_message);
+    ipc_server_start(sockets, handle_message);
 
 fail_errno:
     log(LOGL_ERROR, "Daemon init failed: %m");
