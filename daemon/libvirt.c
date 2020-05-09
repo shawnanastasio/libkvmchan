@@ -38,6 +38,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/timerfd.h>
 
 #include <libvirt/libvirt.h>
 #include <libvirt/libvirt-qemu.h>
@@ -67,6 +68,7 @@ struct cleanup_action {
         uint32_t u32;
     } args[2];
     bool (*cleanup_func)(union cleanup_arg arg1, union cleanup_arg arg2);
+    int timerfd; // timerfd that notifies when action should be executed, or -1
 };
 
 // Vec of domain_info structs for currently running domains
@@ -79,6 +81,12 @@ static sem_t cleanup_queue_sem;
 
 // libvirt connection
 static virConnectPtr conn;
+
+static void cleanup_action_destructor(void *action_) {
+    struct cleanup_action *action = action_;
+    if (action->timerfd >= 0)
+        close(action->timerfd);
+}
 
 static bool get_domain_id_by_pid(pid_t pid, unsigned int *id_out) {
     bool ret = false;
@@ -390,6 +398,16 @@ static bool detach_ivshmem_device(virDomainPtr dom, uint32_t index) {
     cleanup->args[1].u32 = index;
     cleanup->cleanup_func = chardev_cleanup_callback;
 
+    // Setup timer to run every 1s
+    cleanup->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    ASSERT(cleanup->timerfd >= 0);
+    struct itimerspec its = {
+        .it_interval = { .tv_sec = 1 },
+        .it_value = { .tv_sec = 1 }
+    };
+    ASSERT(timerfd_settime(cleanup->timerfd, 0, &its, NULL) == 0);
+
+
     ASSERT(HANDLE_EINTR(sem_wait(&cleanup_queue_sem)) == 0);
     vec_voidp_push_back(&cleanup_queue, cleanup);
     ASSERT(HANDLE_EINTR(sem_post(&cleanup_queue_sem)) == 0);
@@ -670,7 +688,7 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
     if (!ipc_start(mainsoc, IPC_DEST_LIBVIRT, handle_ipc_message))
         goto error;
 
-    if (!vec_voidp_init(&cleanup_queue, 10, free_destructor))
+    if (!vec_voidp_init(&cleanup_queue, 10, cleanup_action_destructor))
         goto error;
     if (sem_init(&cleanup_queue_sem, 0, 1) < 0)
         goto error;
@@ -782,6 +800,16 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
         size_t i = cleanup_queue.count;
         while (i-- > 0) {
             struct cleanup_action *cur = cleanup_queue.data[i];
+
+            if (cur->timerfd > 0) {
+                // If a timer was provided make sure it has fired
+                uint64_t count;
+                if (read(cur->timerfd, &count, sizeof(uint64_t)) < 0) {
+                    ASSERT(errno == EAGAIN);
+                    continue; // Hasn't fired, skip this action
+                }
+            }
+
             if (cur->cleanup_func(cur->args[0], cur->args[1])) {
                 // Cleanup succeeded, remove this action from the queue
                 vec_voidp_remove(&cleanup_queue, i);

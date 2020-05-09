@@ -29,6 +29,7 @@
 
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/eventfd.h>
 
 #include "util.h"
 #include "ipc.h"
@@ -164,18 +165,25 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         goto fail_memfd;
     }
 
+    // Allocate eventfds
+    int eventfds[4] = {-1, -1, -1, -1};
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+        if ((eventfds[i] = eventfd(0, 0)) < 0)
+            goto fail_eventfds;
+    }
+
     // Validate any remote domain IDs
     pid_t server_pid = -1, client_pid = -1;
     if (server_dom > 0 && (server_pid = get_domain_pid(server_dom)) < 0) {
         log(LOGL_WARN, "Tried to create vchan with invalid server domain %"PRIu32
             ". Ignoring...", server_dom);
-        goto fail_memfd;
+        goto fail_eventfds;
     }
 
     if (client_dom > 0 && (client_pid = get_domain_pid(client_dom)) < 0) {
         log(LOGL_WARN, "Tried to create vchan with invalid client domain %"PRIu32
             ". Ignoring...", client_dom);
-        goto fail_memfd;
+        goto fail_eventfds;
     }
 
     // Inform ivshmem of any new connections it will receive
@@ -190,17 +198,17 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         },
         .dest = IPC_DEST_IVSHMEM,
         .flags = IPC_FLAG_FD | IPC_FLAG_WANTRESP,
-        .fd_count = 1,
-        .fds = {memfd}
+        .fd_count = 5,
+        .fds = {memfd, eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
     };
     if (!ipc_send_message(&msg, &resp)) {
         log(LOGL_ERROR, "Failed to send IPC message to IVSHMEM: %m.");
-        goto fail_memfd;
+        goto fail_eventfds;
     }
 
     if (resp.resp.error) {
         log(LOGL_ERROR, "IVSHMEM rejected new connection. Ignoring...");
-        goto fail_memfd;
+        goto fail_eventfds;
     }
 
     // Extract IVPosition(s) from result
@@ -236,7 +244,8 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         .server = { .dom = server_dom, .pid = server_pid, .ivposition = server_ivposition },
         .client = { .dom = client_dom, .pid = client_pid, .ivposition = client_ivposition },
         .port = port,
-        .memfd = memfd
+        .memfd = memfd,
+        .eventfds = {eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
     };
     if (!connections_add(&conn)) {
         log(LOGL_ERROR, "Failed to record new vchan: %m.");
@@ -251,6 +260,10 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
 fail_register_conn:
     // TODO: don't leak the pending connection in the ivshmem process
+fail_eventfds:
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
+        if (eventfds[i] > 0)
+            close(eventfds[i]);
 fail_memfd:
     close(memfd);
 fail:

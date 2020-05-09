@@ -72,6 +72,7 @@ struct conn_info {
 
 struct pending_conn {
     int shmfd;
+    int eventfds[NUM_EVENTFDS * 2]; // 2 incoming eventfds + 2 outgoing eventfds
     uint32_t ivposition;
 };
 
@@ -548,20 +549,21 @@ static bool do_init_sequence(struct ivshmem_server *server, int fd) {
     for (size_t i=0; i<ARRAY_SIZE(eventfds); i++)
         eventfds[i] = -1; // Initialize to -1 to make cleanup easier
 
-    // Allocate eventfds
-    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
-        if ((eventfds[i] = eventfd(0, 0)) < 0)
-            goto fail;
-
-        if (i < NUM_EVENTFDS)
-            conn->incoming_eventfds[i] = eventfds[i];
-        else
-            conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
-    }
-
     bool first_conn = false;
     if (info->connections.count == 0) {
         first_conn = true;
+
+        // Allocate eventfds
+        for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+            if ((eventfds[i] = eventfd(0, 0)) < 0)
+                goto fail;
+
+            if (i < NUM_EVENTFDS)
+                conn->incoming_eventfds[i] = eventfds[i];
+            else
+                conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
+        }
+
 
         // The first connection is for communicating with this daemon
         if ((conn->shmfd = memfd_create("kvmchand_shm", 0)) < 0)
@@ -583,10 +585,20 @@ static bool do_init_sequence(struct ivshmem_server *server, int fd) {
         conn->ivposition = p->ivposition;
         conn->shmfd = p->shmfd;
         id = p->ivposition;
+        for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+            eventfds[i] = p->eventfds[i];
+        }
 
         vec_voidp_remove(&info->pending, 0);
     }
     conn->socfd = fd;
+    for (size_t i=0; i<ARRAY_SIZE(eventfds); i++) {
+        if (i < NUM_EVENTFDS)
+            conn->incoming_eventfds[i] = eventfds[i];
+        else
+            conn->outgoing_eventfds[i - NUM_EVENTFDS] = eventfds[i];
+    }
+
 
     if (!vec_voidp_push_back(&info->connections, conn))
         goto fail;
@@ -674,8 +686,10 @@ static bool remove_connection_by_ivpos(struct ivshmem_server *server, pid_t pid,
                                        uint32_t ivposition) {
 
     struct client_info *client = get_client(server, pid, false, NULL);
-    if (!client)
+    if (!client) {
+        log(LOGL_ERROR, "remove_connection failed: no such client at pid %u\n", pid);
         return false;
+    }
 
     bool found_conn = false;
     size_t conn_i;
@@ -687,8 +701,10 @@ static bool remove_connection_by_ivpos(struct ivshmem_server *server, pid_t pid,
             break;
         }
     }
-    if (!found_conn)
+    if (!found_conn) {
+        log(LOGL_ERROR, "remove_connection failed: no such connection at pid %u\n", pid);
         return false;
+    }
 
     vec_voidp_remove(&client->connections, conn_i);
 
@@ -697,12 +713,15 @@ static bool remove_connection_by_ivpos(struct ivshmem_server *server, pid_t pid,
 
 /**
  * Register an upcomming connection from a QEMU process.
- * @param server server instance to register on
- * @param pid    PID of QEMU process that will connect
- * @param shmfd  fd to shared memory
+ * @param server   server instance to register on
+ * @param pid      PID of QEMU process that will connect
+ * @param shmfd    fd to shared memory
+ * @param eventfds array of 4 eventfds to use
+ * @param flip_fds whether or not to flip incoming/outgoing eventfd order
  * @return       newly allocated ivposition, or 0 on failure
  */
-static uint32_t register_conn(struct ivshmem_server *server, pid_t pid, int shmfd) {
+static uint32_t register_conn(struct ivshmem_server *server, pid_t pid, int shmfd,
+                              int *eventfds, bool flip_fds) {
     struct client_info *client = get_client(server, pid, false, NULL);
     if (!client)
         goto fail;
@@ -715,6 +734,20 @@ static uint32_t register_conn(struct ivshmem_server *server, pid_t pid, int shmf
 
     if (!vec_voidp_push_back(&client->pending, pending))
         goto fail_ivposition;
+
+    if (flip_fds) {
+        // Flip incoming and outgoing eventfds
+        pending->eventfds[0] = eventfds[2];
+        pending->eventfds[1] = eventfds[3];
+        pending->eventfds[2] = eventfds[0];
+        pending->eventfds[3] = eventfds[1];
+    } else {
+        // 1:1 copy
+        pending->eventfds[0] = eventfds[0];
+        pending->eventfds[1] = eventfds[1];
+        pending->eventfds[2] = eventfds[2];
+        pending->eventfds[3] = eventfds[3];
+    }
 
     return pending->ivposition;
 
@@ -745,10 +778,15 @@ static void handle_ipc_message(struct ipc_message *msg) {
             // Register up to two pending connections
             uint32_t ivpositions[2] = {0};
             int shmfd = msg->fds[0];
-            for (uint8_t i=0; i<2; i++) {
-                pid_t pid = cmd->args[i];
-                if (pid > 0)
-                    ivpositions[i] = register_conn(&g_server, pid, shmfd);
+            int *eventfds = &msg->fds[1];
+
+            // Register first connection (mandatory)
+            pid_t pid = cmd->args[0];
+            ivpositions[0] = register_conn(&g_server, pid, shmfd, eventfds, false);
+
+            // Register second connection if present
+            if ((pid = cmd->args[1]) > 0) {
+                ivpositions[1] = register_conn(&g_server, pid, shmfd, eventfds, true);
             }
 
             response.resp.ret = ivpositions[0];

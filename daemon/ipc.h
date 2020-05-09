@@ -164,6 +164,23 @@ struct ipc_message {
  * args[0] - (pid_t) QEMU pid that will soon connect, or 0
  * args[1] - (pid_t) Another QEMU pid that will soon connect, or 0
  * fds[0] - memfd backing shared storage
+ * fds[1-4] - eventfds
+ *
+ * The first file descriptor contains the memfd backing the shared memory region.
+ *
+ * fds 1-4 contain the eventfds used for sending/receiving notifications.
+ * Since this command accepts up to two QEMU clients, the eventfd interpretation
+ * differs depending on the number of clients provided.
+ *
+ * If only one client is provided, the eventfds will be interpreted as follows:
+ * fds[1] - incoming eventfd 0
+ * fds[2] - incoming eventfd 1
+ * fds[3] - outgoing eventfd 0
+ * fds[4] - outgoing eventfd 1
+ *
+ * If two clients are provided, the eventfds will be cross-wired for the second
+ * client. This means that client 1's incoming eventfds will be wired to client 2's
+ * outgoing eventfds, and vice versa.
  *
  * resp.error - error?
  * resp.ret - (u64) ivposition0

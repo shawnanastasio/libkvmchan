@@ -40,6 +40,13 @@ struct connection {
 
     // memfd backing shared memory region
     int memfd;
+
+    // Notification eventfds
+    // TODO: For now, ownership of these eventfds is handled by ivshmem,
+    // so we don't need to deallocate them in the connection destructor.
+    //
+    // Eventually this should be changed so we own all fds.
+    int eventfds[4];
 };
 
 bool connections_init(void);
