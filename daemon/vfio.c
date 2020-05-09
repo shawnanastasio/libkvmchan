@@ -498,7 +498,20 @@ static bool enumerate_ivshmem_devices(struct vec_voidp *devices, bool nodup) {
         ;
     }
 
+    closedir(dir);
     return true;
+}
+
+bool remove_ivshmem_device(struct vec_voidp *devices, char *name) {
+    for (size_t i=0; i<devices->count; i++) {
+        char *cur = devices->data[i];
+        if (strcmp(cur, name) == 0) {
+            vec_voidp_remove(devices, i);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static int vfio_get_device_fd(struct vfio_data *data, const char *device) {
@@ -1138,6 +1151,7 @@ void run_vfio_loop(int mainsoc) {
             struct vfio_connection *cur_conn = get_conn_by_req_eventfd(&vfio, fd, &conn_i);
             ASSERT(cur_conn);
 
+            ASSERT(remove_ivshmem_device(&ivshmem_devices, cur_conn->name));
             vec_voidp_remove(&vfio.connections, conn_i);
         }
     }
