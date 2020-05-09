@@ -198,6 +198,7 @@ static bool connect_to_daemon(struct libkvmchan_state *state) {
     }
 
     state->socfd = fd;
+    g_state.flags |= STATE_FLAG_CONNECTED;
     return true;
 
 fail_fd:
