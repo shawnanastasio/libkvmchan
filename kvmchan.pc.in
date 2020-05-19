@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+includedir=@INCLUDEDIR@
+libdir=@LIBDIR@
+
+Name: libkvmchan
+Description: An implementation of the Xen vchan API on KVM
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lkvmchan

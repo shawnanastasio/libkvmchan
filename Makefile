@@ -19,7 +19,7 @@ TEST_LIBS:=$(shell pkg-config --cflags --libs check)
 TEST_LIBRARY_SRCS:=test_library.c
 TEST_LIBRARY_BIN:=test_library
 
-CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wvla -fpic -fvisibility=hidden -std=gnu99 -I. \
+CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wextra -Wvla -fpic -fvisibility=hidden -std=gnu99 -I. \
 	   -fstack-protector-strong -D_FORITY_SOURCE=2
 
 ifneq ($(DEBUG),false)
@@ -32,8 +32,11 @@ ifneq ($(COMPILER_NAME),clang)
 CFLAGS += -fstack-clash-protection
 endif
 
+PREFIX ?= /usr/local
+LIBDIR ?= $(PREFIX)/lib
+INCLUDEDIR ?= $(PREFIX)/include
 
-.PHONY all: library daemon build_test $(TEST_LIBRARY_BIN)
+.PHONY all: library daemon build_test $(TEST_LIBRARY_BIN) kvmchan.pc
 
 library: $(DEPS)
 	$(CC) -shared $(CFLAGS) $(DEPS) -o $(BIN) $(LIBS)
@@ -55,6 +58,19 @@ test: build_test
 
 $(TEST_LIBRARY_BIN): library
 	$(CC) $(CFLAGS) -fvisibility=default $(TEST_LIBRARY_SRCS)  -lkvmchan -L. -o $(TEST_LIBRARY_BIN) 
+
+kvmchan.pc: kvmchan.pc.in
+	sed -e "s/@VERSION@/`cat version`/" \
+		-e "s:@PREFIX@:$(PREFIX):" \
+		-e "s:@LIBDIR@:$(LIBDIR):" \
+		-e "s:@INCLUDEDIR@:$(INCLUDEDIR):" \
+		$< > $@
+
+install: all
+	install $(DAEMON_BIN) $(PREFIX)/bin
+	install $(BIN) $(LIBDIR)
+	install libkvmchan.h libkvmchan-priv.h $(INCLUDEDIR)
+	install kvmchan.pc $(LIBDIR)/pkgconfig
 
 clean:
 	rm -f $(DEPS)
