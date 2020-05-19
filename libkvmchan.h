@@ -40,5 +40,7 @@ LIBKVMCHAN_EXPORTED int libkvmchan_write(struct libkvmchan *chan, void *data, si
 LIBKVMCHAN_EXPORTED int libkvmchan_get_eventfd(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED bool libkvmchan_close(struct libkvmchan *chan);
+LIBKVMCHAN_EXPORTED size_t libkvmchan_data_ready(struct libkvmchan *chan);
+LIBKVMCHAN_EXPORTED size_t libkvmchan_buffer_space(struct libkvmchan *chan);
 
 #endif // LIBKVMCHAN_H

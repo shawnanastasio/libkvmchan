@@ -63,6 +63,7 @@ struct libkvmchan_state {
 struct libkvmchan {
     uint32_t flags;
 #define KVMCHAN_FLAG_SERVER (1 << 0) // We're the server
+#define KVMCHAN_FLAG_CONNECTED (1 << 1) // Client connected
 
     // Pointer to memory region that is shared between server/client
     void *shm;
@@ -169,6 +170,20 @@ static ssize_t localmsg_recv(int socfd, void *buf, size_t len, int fds_out[KVMCH
 
 out:
     return s;
+}
+
+static inline void check_client_connected(struct libkvmchan *chan) {
+    // If we're a client or the client has already connected, exit
+    if (!(chan->flags & KVMCHAN_FLAG_SERVER) || (chan->flags & KVMCHAN_FLAG_CONNECTED))
+        return;
+
+    // Wait for the dummy byte from the client
+    ringbuf_t *priv = &chan->client_to_host_rb;
+    ringbuf_pub_t *pub = &((shmem_hdr_t *)(chan->shm))->client_to_host_pub;
+
+    uint8_t dummy;
+    assert(RB_SUCCESS == ringbuf_sec_read(priv, pub, &dummy, 1));
+    chan->flags |= KVMCHAN_FLAG_CONNECTED;
 }
 
 static bool connect_to_daemon(struct libkvmchan_state *state) {
@@ -458,6 +473,12 @@ struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port) {
         goto out_fail_fds;
     }
 
+    // Finally, send a dummy byte to let the server know that the client has connected
+    uint8_t dummy = 0;
+    ringbuf_t *priv = &ret->client_to_host_rb;
+    ringbuf_pub_t *pub = &((shmem_hdr_t *)(ret->shm))->client_to_host_pub;
+    ringbuf_sec_write(priv, pub, &dummy, 1);
+
     // Success
     goto out;
 
@@ -479,6 +500,7 @@ out:
  * @return -1 on error, or `size`.
  */
 int libkvmchan_recv(struct libkvmchan *chan, void *data, size_t size) {
+    check_client_connected(chan);
     ringbuf_t *priv;
     ringbuf_pub_t *pub;
     if (chan->flags & KVMCHAN_FLAG_SERVER) {
@@ -503,6 +525,7 @@ int libkvmchan_recv(struct libkvmchan *chan, void *data, size_t size) {
  * @return -1 on error, or `size`.
  */
 int libkvmchan_send(struct libkvmchan *chan, void *data, size_t size) {
+    check_client_connected(chan);
     ringbuf_t *priv;
     ringbuf_pub_t *pub;
     if (chan->flags & KVMCHAN_FLAG_SERVER) {
@@ -527,6 +550,7 @@ int libkvmchan_send(struct libkvmchan *chan, void *data, size_t size) {
  * @return -1 on error, or number of bytes written.
  */
 int libkvmchan_read(struct libkvmchan *chan, void *data, size_t size) {
+    check_client_connected(chan);
     ringbuf_t *priv;
     ringbuf_pub_t *pub;
     if (chan->flags & KVMCHAN_FLAG_SERVER) {
@@ -551,6 +575,7 @@ int libkvmchan_read(struct libkvmchan *chan, void *data, size_t size) {
  * @return -1 on error, or number of bytes read.
  */
 int libkvmchan_write(struct libkvmchan *chan, void *data, size_t size) {
+    check_client_connected(chan);
     ringbuf_t *priv;
     ringbuf_pub_t *pub;
     if (chan->flags & KVMCHAN_FLAG_SERVER) {
@@ -643,6 +668,50 @@ bool libkvmchan_close(struct libkvmchan *chan) {
 out:
     // free chan struct
     free(chan);
+
+    return ret;
+}
+
+/**
+ * Get the amount of data available to read without blocking, in bytes.
+ */
+size_t libkvmchan_data_ready(struct libkvmchan *chan) {
+    ringbuf_t *priv;
+    ringbuf_pub_t *pub;
+    if (chan->flags & KVMCHAN_FLAG_SERVER) {
+        // We're the server, read from c2h ringbuf
+        priv = &chan->client_to_host_rb;
+        pub = &((shmem_hdr_t *)(chan->shm))->client_to_host_pub;
+    } else {
+        // We're the client, read from h2c ringbuf
+        priv = &chan->host_to_client_rb;
+        pub = &((shmem_hdr_t *)(chan->shm))->host_to_client_pub;
+    }
+
+    size_t ret = 0;
+    assert(RB_SUCCESS == ringbuf_sec_available(priv, pub, &ret));
+
+    return ret;
+}
+
+/**
+ * Get the amount of space free to write without blocking, in bytes
+ */
+size_t libkvmchan_buffer_space(struct libkvmchan *chan) {
+    ringbuf_t *priv;
+    ringbuf_pub_t *pub;
+    if (chan->flags & KVMCHAN_FLAG_SERVER) {
+        // We're the server, write to h2c ringbuf
+        priv = &chan->host_to_client_rb;
+        pub = &((shmem_hdr_t *)(chan->shm))->host_to_client_pub;
+    } else {
+        // We're the client, write to c2h ringbuf
+        priv = &chan->client_to_host_rb;
+        pub = &((shmem_hdr_t *)(chan->shm))->client_to_host_pub;
+    }
+
+    size_t ret = 0;
+    assert(RB_SUCCESS == ringbuf_sec_free_space(priv, pub, &ret));
 
     return ret;
 }
