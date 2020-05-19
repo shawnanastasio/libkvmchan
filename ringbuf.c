@@ -54,6 +54,16 @@ static void block_on_eventfd(int eventfd) {
     ignore_value(select(eventfd + 1, &rfds, NULL, NULL, NULL));
 }
 
+static void clear_eventfd(int fd) {
+    // Temporarily disable blocking and reset the eventfd's counter
+    uint64_t buf;
+    int fd_flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fd_flags | O_NONBLOCK);
+    ignore_value(read(fd, &buf, sizeof(uint64_t)));
+    if (!(fd_flags & O_NONBLOCK))
+        fcntl(fd, F_SETFL, fd_flags);
+}
+
 static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size,
                                 bool stream_mode, size_t *size_out) {
     int eventfd = priv->incoming_eventfd;
@@ -89,6 +99,7 @@ static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size
 success:
     if (size_out)
         *size_out = size;
+    clear_eventfd(eventfd);
     return RB_SUCCESS;
 }
 
@@ -139,6 +150,7 @@ static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t siz
 success:
     if (size_out)
         *size_out = size;
+    clear_eventfd(eventfd);
     return RB_SUCCESS;
 }
 
@@ -632,15 +644,8 @@ int ringbuf_get_eventfd(ringbuf_t *rb) {
 
 void ringbuf_clear_eventfd(ringbuf_t *rb) {
     int fd = ringbuf_get_eventfd(rb);
-    if (fd < 0)
-        return;
-
-    // Temporarily disable blocking and reset the eventfd's counter
-    uint64_t buf;
-    int fd_flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, fd_flags | O_NONBLOCK);
-    ignore_value(read(fd, &buf, sizeof(uint64_t)));
-    fcntl(fd, F_SETFL, fd_flags);
+    if (fd >= 0)
+        clear_eventfd(fd);
 }
 
 void ringbuf_close(ringbuf_t *rb) {
