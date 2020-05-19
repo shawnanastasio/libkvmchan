@@ -376,8 +376,11 @@ static int validate_vfio_bind(struct vec_voidp *devices) {
                  (char *)devices->data[i]);
         DIR *dir = opendir(pathbuf);
         if (!dir) {
-            if (errno == ENOENT)
+            if (errno == ENOENT) {
+                closedir(dir);
                 return 0;
+            }
+            closedir(dir);
             log(LOGL_ERROR, "Error encountered while checking vfio-pci devices: %m!");
             return -1;
         }
@@ -713,6 +716,7 @@ static void vfio_conn_free_eventfds(struct vfio_connection *conn) {
     uint64_t buf = 1;
     ignore_value(write(conn->outgoing_thread_kill, &buf, 8));
     pthread_join(conn->outgoing_thread, NULL);
+    close(conn->outgoing_thread_kill);
 
     for (size_t i=0; i<NUM_EVENTFDS; i++)
         close(conn->outgoing_eventfds[i]);
