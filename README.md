@@ -44,7 +44,7 @@ This means that applications using `libkvmchan.so`'s wrappers do not need to wor
 operating in dom 0 or not.
 
 Security
---------pid
+--------
 __Disclaimer: I provide absolutely zero security guarantees for libkvmchan. Before using it, please consider
 whether or not your threat model allows you to trust random, unaudited C code from GitHub.
 That being said, I have tried my best to architect the software in a robust and secure manner.
