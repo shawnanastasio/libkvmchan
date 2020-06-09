@@ -19,17 +19,17 @@ The different processes communicate using a custom IPC mechanism that wraps UNIX
 
 The different parts of the daemon are as follows:
 
-    * main (daemon.c) - Implements high level vchan bookkeeping and IPC packet routing. Allocates shared memory and keeps track of active vchans.
+* main (daemon.c) - Implements high level vchan bookkeeping and IPC packet routing. Allocates shared memory and keeps track of active vchans.
 
-    * ivshmem (ivshmem.c) - Implements the ivshmem server protocol. Allows assignment of shared memory to QEMU at run-time.
+* ivshmem (ivshmem.c) - Implements the ivshmem server protocol. Allows assignment of shared memory to QEMU at run-time.
 
-    * libvirt (libvirt.c) - VM lifecycle management and run-time hardware configuration. Allows attaching/detaching ivshmem PCIe devices to VMs at run-time.
+* libvirt (libvirt.c) - VM lifecycle management and run-time hardware configuration. Allows attaching/detaching ivshmem PCIe devices to VMs at run-time.
 
-    * localhandler (localhandler.c) - Implements the local UNIX socket API that allows clients in the same domain to create/destroy vchans. Used by libkvmchan.so
+* localhandler (localhandler.c) - Implements the local UNIX socket API that allows clients in the same domain to create/destroy vchans. Used by libkvmchan.so
 
-    * VFIO (vfio.c) - Implements a userspace PCIe driver for ivshmem devices using the VFIO subsystem. Handles shared memory mapping and interrupts.
+* VFIO (vfio.c) - Implements a userspace PCIe driver for ivshmem devices using the VFIO subsystem. Handles shared memory mapping and interrupts.
 
-    * IPC (ipc.c) - Implements the synchronous RPC framework that allows the other parts to talk to each other.
+* IPC (ipc.c) - Implements the synchronous RPC framework that allows the other parts to talk to each other.
 
 Due to the nature of libkvmchan's design, the `kvmchand` daemon must be running in every domain that wishes to use vchans. The daemon contains two modes that determine which features enabled - Host and Guest.
 
@@ -44,7 +44,7 @@ This means that applications using `libkvmchan.so`'s wrappers do not need to wor
 operating in dom 0 or not.
 
 Security
---------
+--------pid
 __Disclaimer: I provide absolutely zero security guarantees for libkvmchan. Before using it, please consider
 whether or not your threat model allows you to trust random, unaudited C code from GitHub.
 That being said, I have tried my best to architect the software in a robust and secure manner.
