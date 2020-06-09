@@ -264,6 +264,10 @@ static void handle_message(struct ipc_message *msg) {
                                                (uint32_t)cmd->args[2]);
             break;
 
+        case MAIN_IPC_CMD_UNREGISTER_DOM:
+            response.resp.error = !vchan_unregister_domain((pid_t)cmd->args[0]);
+            break;
+
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }

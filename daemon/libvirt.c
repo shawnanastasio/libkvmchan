@@ -57,9 +57,6 @@
 struct domain_info {
     char uuid_str[VIR_UUID_STRING_BUFLEN];
     pid_t pid; // PID of qemu process
-
-    struct vec_u32 indices; // Allocated PCI device indices
-    uint32_t index_last;    // Last allocated PCI device index
 };
 
 struct cleanup_action {
@@ -69,6 +66,9 @@ struct cleanup_action {
     } args[2];
     bool (*cleanup_func)(union cleanup_arg arg1, union cleanup_arg arg2);
     int timerfd; // timerfd that notifies when action should be executed, or -1
+
+    // Domain that this action affects. Will be checked before executing.
+    virDomainPtr dom_ptr;
 };
 
 // Vec of domain_info structs for currently running domains
@@ -147,6 +147,30 @@ static bool get_info_by_domain_id(uint32_t id, struct domain_info **info_out) {
 
         if (virDomainGetID(dom) == id) {
             *info_out = cur;
+            ret = true;
+            goto out;
+        }
+    }
+
+out:
+    ASSERT(HANDLE_EINTR(sem_post(&running_domains_sem)) == 0);
+    return ret;
+}
+
+static bool domain_is_running(virDomainPtr dom) {
+    bool ret = false;
+    ASSERT(HANDLE_EINTR(sem_wait(&running_domains_sem)) == 0);
+
+    char cur_uuid[VIR_UUID_STRING_BUFLEN];
+    for (size_t i=0; i<running_domains.count; i++) {
+        struct domain_info *cur = running_domains.data[i];
+
+        if (virDomainGetUUIDString(dom, cur_uuid) < 0) {
+            log(LOGL_WARN, "Failed to lookup domain's UUID. Something is probably wrong.");
+            continue;
+        }
+
+        if (strncmp(cur->uuid_str, cur_uuid, VIR_UUID_STRING_BUFLEN) == 0) {
             ret = true;
             goto out;
         }
@@ -397,6 +421,7 @@ static bool detach_ivshmem_device(virDomainPtr dom, uint32_t index) {
     cleanup->args[0].ptr = dom;
     cleanup->args[1].u32 = index;
     cleanup->cleanup_func = chardev_cleanup_callback;
+    cleanup->dom_ptr = dom;
 
     // Setup timer to run every 1s
     cleanup->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
@@ -519,18 +544,10 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
                 break;
             }
 
-            info->index_last = 0;
-            if (!vec_u32_init(&info->indices, 10, NULL)) {
-                log(LOGL_WARN, "Failed to init indices vec for domain! Ignoring...");
-                free(info);
-                break;
-            }
-
             // Create a new ivshmem device on the guest
             // that will be used for guest<->kvmchand communication
             if (!attach_ivshmem_device(dom, IVSHMEM_SOCK_PATH, 0)) {
                 log(LOGL_WARN, "Failed to attach ivshmem device! Ignoring...");
-                vec_u32_destroy(&info->indices);
                 free(info);
                 break;
             }
@@ -546,11 +563,13 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             // Remove this domain from running_domains
             sem_wait(&running_domains_sem);
             bool removed = false;
+            pid_t dom_pid = -1;
             for (size_t i=0; i<running_domains.count; i++) {
                 struct domain_info *cur = running_domains.data[i];
 
                 if (strncmp(cur->uuid_str, uuid, VIR_UUID_STRING_BUFLEN) == 0) {
-                    log(LOGL_INFO, "Removing domain %s\n", cur->uuid_str);
+                    log(LOGL_INFO, "Removing domain %s", cur->uuid_str);
+                    dom_pid = cur->pid;
                     vec_voidp_remove(&running_domains, i);
                     removed = true;
                     break;
@@ -559,9 +578,25 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             sem_post(&running_domains_sem);
 
             if (!removed) {
-                log(LOGL_ERROR, "Domain %s stopped but wasn't supposed to be running!\n",
+                log(LOGL_ERROR, "Domain %s stopped but wasn't supposed to be running!",
                         virDomainGetName(dom));
             }
+
+            // Notify main
+            struct ipc_message resp, msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_UNREGISTER_DOM,
+                    .args = { dom_pid }
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP,
+            };
+            if (!ipc_send_message(&msg, &resp)) {
+                log(LOGL_ERROR, "Failed to send IPC message to libvirt: %m.");
+                return false;
+            }
+
             break;
         default:
             log(LOGL_WARN, "Unknown lifecycle event %d! Ignoring...");
@@ -767,13 +802,6 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
                 goto error;
             }
 
-            info->index_last = 0;
-            if (!vec_u32_init(&info->indices, 10, NULL)) {
-                log(LOGL_WARN, "Failed to init indices vec for domain!");
-                free(domains);
-                goto error;
-            }
-
             // Create a new ivshmem device on the guest
             // that will be used for guest<->kvmchand communication
             if (!attach_ivshmem_device(p, IVSHMEM_SOCK_PATH, 0)) {
@@ -800,6 +828,12 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
         size_t i = cleanup_queue.count;
         while (i-- > 0) {
             struct cleanup_action *cur = cleanup_queue.data[i];
+
+            if (!domain_is_running(cur->dom_ptr)) {
+                // Domain is no longer running, remove and skip
+                vec_voidp_remove(&cleanup_queue, i);
+                continue;
+            }
 
             if (cur->timerfd > 0) {
                 // If a timer was provided make sure it has fired

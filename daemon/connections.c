@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -365,4 +365,25 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     vec_voidp_remove(&connections, conn_i);
 
     return true;
+}
+
+/**
+ * Remove a closed domain from all bookkeeping data. Close all corresponding vchans.
+ */
+bool vchan_unregister_domain(pid_t pid) {
+    size_t i = connections.count;
+    while (i-- > 0) {
+        struct connection *cur = connections.data[i];
+
+        if (cur->server.pid == pid || cur->client.pid == pid) {
+            // Either the server or client shut down, destroy this connection.
+            vec_voidp_remove(&connections, i);
+            log(LOGL_INFO, "Removed vchan between dom %u (server) and dom %u, (client)",
+                    cur->server.dom, cur->client.dom);
+            return true;
+        }
+    }
+
+    log(LOGL_INFO, "No active connections found for pid %d", pid);
+    return false;
 }

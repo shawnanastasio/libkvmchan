@@ -115,6 +115,15 @@ struct ipc_message {
  */
 #define MAIN_IPC_CMD_VCHAN_CLOSE 2
 
+/**
+ * Notify that a guest domain has shut down.
+ * args[0] - (u32) pid of guest domain
+ *
+ * resp.error - error?
+ */
+#define MAIN_IPC_CMD_UNREGISTER_DOM 3
+
+
 // libvirt process commands
 
 /**
