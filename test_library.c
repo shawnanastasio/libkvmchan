@@ -27,7 +27,7 @@ int read_wrapper(struct libkvmchan *chan, void *data, size_t size) {
     while (read < size) {
         size_t remaining = size - read;
 
-        size_t n;
+        int n;
         if ((n = libkvmchan_read(chan, data+read, remaining)) < 0)
             return -1;
 
@@ -42,7 +42,7 @@ int write_wrapper(struct libkvmchan *chan, void *data, size_t size) {
     while (written < size) {
         size_t remaining = size - written;
 
-        size_t n;
+        int n;
         if ((n = libkvmchan_write(chan, data+written, remaining)) < 0)
             return -1;
 
