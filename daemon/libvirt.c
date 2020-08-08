@@ -270,7 +270,7 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, uint32_t i
 
     // A QMP command to add a new chardev with formats %d %s (index, path)
     const char qmp_new_chardev_format[] = "{\"execute\":\"chardev-add\", \"arguments\": {\"id\":"
-        "\"charshmem%d"PRIu32"\", \"backend\":{ \"type\": \"socket\", \"data\": "
+        "\"charshmem%"PRIu32"\", \"backend\":{ \"type\": \"socket\", \"data\": "
         "{\"server\": false, \"addr\": {\"type\": \"unix\", \"data\": {\"path\": \"%s\"} } } } } }";
 
     // A QMP command to add a new ivshmem device with format %d (index)
