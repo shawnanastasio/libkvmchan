@@ -523,6 +523,8 @@ static bool spawn_kvmchan_listener(virDomainPtr dom) {
 
 static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
                                      int event, int detail, void *opaque) {
+    ignore_value(conn);
+    ignore_value(opaque);
     char uuid[VIR_UUID_STRING_BUFLEN];
     virDomainGetUUIDString(dom, uuid);
     log(LOGL_INFO, "Domain %s(%d, UUID: %s) changed state (event: %d, detail: %d)!",
@@ -606,6 +608,8 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
 
 static void connect_close_callback(virConnectPtr conn, int reason,
                                    void *opaque) {
+    ignore_value(conn);
+    ignore_value(opaque);
     switch ((virConnectCloseReason) reason) {
         case VIR_CONNECT_CLOSE_REASON_ERROR:
             log(LOGL_ERROR, "Connection closed due to I/O error");

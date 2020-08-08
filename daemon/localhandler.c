@@ -142,7 +142,7 @@ static void record_close(struct client *client, struct kvmchand_message *msg) {
  * Handle IPC mesages from other kvmchand processes
  */
 static void handle_ipc_message(struct ipc_message *msg) {
-
+    ignore_value(msg);
 }
 
 static ssize_t localmsg_send(int socfd, void *data, size_t len, int fds[KVMCHAND_FD_MAX], uint8_t fd_count) {
