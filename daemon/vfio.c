@@ -377,10 +377,8 @@ static int validate_vfio_bind(struct vec_voidp *devices) {
         DIR *dir = opendir(pathbuf);
         if (!dir) {
             if (errno == ENOENT) {
-                closedir(dir);
                 return 0;
             }
-            closedir(dir);
             log(LOGL_ERROR, "Error encountered while checking vfio-pci devices: %m!");
             return -1;
         }
