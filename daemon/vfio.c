@@ -68,6 +68,7 @@
 #include <string.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <assert.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -87,6 +88,7 @@
 #include "libkvmchan-priv.h"
 
 #define REASONABLE_PATH_LEN 512
+#define IOMMU_GROUP_LENGTH  4
 
 // Helper macro for reading ivshmem BAR 0 values
 #if (defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)) && \
@@ -122,13 +124,10 @@ struct ivshmem_bar0 {
     uint8_t reserved1[240];
 };
 
-struct ivshmem_group {
-    char name[4];
-};
-
 struct vfio_connection {
     char name[12 /* len(0000:00:00.0) */ + 1];
     int device_fd;
+    struct vfio_group *group;
     volatile struct ivshmem_bar0 *bar0;
 
     // eventfd data
@@ -158,9 +157,15 @@ struct vfio_host_connection {
     ringbuf_t client_to_host_rb;
 };
 
+struct vfio_group {
+    char path[REASONABLE_PATH_LEN];
+    int fd;
+    size_t refcnt;
+};
+
 struct vfio_data {
     int container;
-    int group;
+    struct vec_voidp groups;
     struct vfio_host_connection host_conn;
     struct vec_voidp connections;
 };
@@ -187,7 +192,18 @@ skip_comma:
     printf("}\n");
 }
 
-static void connection_destructor(void *conn_) {
+void cleanup_vfio_groups(void) {
+    size_t i = g_vfio_data->groups.count;
+    while (i-- > 0) {
+        struct vfio_group *cur = g_vfio_data->groups.data[i];
+        if (cur->refcnt == 0) {
+            log(LOGL_INFO, "Removing unused group %s.", cur->path);
+            vec_voidp_remove(&g_vfio_data->groups, i);
+        }
+    }
+}
+
+static void vfio_connection_destructor(void *conn_) {
     struct vfio_connection *conn = conn_;
 
     if (munmap((void *)conn->bar0, sizeof(struct ivshmem_bar0)) < 0)
@@ -195,11 +211,21 @@ static void connection_destructor(void *conn_) {
 
     vfio_conn_free_eventfds(conn);
     close(conn->device_fd);
+    conn->group->refcnt--;
+
+    if (conn->group->refcnt == 0)
+        cleanup_vfio_groups();
 
     return;
 
 fail:
     log(LOGL_ERROR, "Failed to free connection: %m. Potential resource leak.");
+}
+
+static void vfio_group_destructor(void *group_) {
+    struct vfio_group *group = group_;
+    assert(group->refcnt == 0);
+    close(group->fd);
 }
 
 #ifdef USE_VFIO_NOIOMMU
@@ -243,15 +269,11 @@ static off_t vfio_region_mmap_offset(off_t region) {
  * For now, assume that all ivshmem devices must be in the same group.
  * Not used for NOIOMMU.
  *
- * If group_out is not NULL, the ivshmem group containing the devices
- * will be written to it.
- *
  * @param devices vector of PCI device IDs to validate
  * @return all ivshmem devices in isolated group?
  */
 #ifndef USE_VFIO_NOIOMMU
-static bool validate_iommu_groups(struct vec_voidp *ivshmem_devices,
-                                  struct ivshmem_group *group_out) {
+static bool validate_iommu_groups(struct vec_voidp *ivshmem_devices) {
     // Go through all iommu groups in /sys/kernel/iommu_groups and make sure
     // that all ivshmem devices are contained in a single group with nothing
     // else.
@@ -265,7 +287,7 @@ static bool validate_iommu_groups(struct vec_voidp *ivshmem_devices,
     char pathbuf[REASONABLE_PATH_LEN];
     struct dirent *group;
     bool ivshmem_group_found = false;
-    char ivshmem_group[4];
+    char ivshmem_group[IOMMU_GROUP_LENGTH];
     while ((group = readdir(all_groups))) {
         if (group->d_name[0] == '.')
             continue; // Skip hidden, ".", ".."
@@ -311,10 +333,6 @@ static bool validate_iommu_groups(struct vec_voidp *ivshmem_devices,
     if (!ivshmem_group_found)
         return false;
 
-    // Write group if requested
-    if (group_out)
-        strcpy(group_out->name, ivshmem_group);
-
     return true;
 
 fail:
@@ -325,8 +343,7 @@ cleanup:
 }
 #endif
 
-static bool validate_vfio_configuration(struct vec_voidp *ivshmem_devices,
-                                        struct ivshmem_group *group_out) {
+static bool validate_vfio_configuration(struct vec_voidp *ivshmem_devices) {
     // Check if vfio_pci is loaded by accessing
     // /sys/bus/pci/drivers/vfio-pci
     int fd = open("/sys/bus/pci/drivers/vfio-pci", O_RDONLY);
@@ -340,7 +357,6 @@ static bool validate_vfio_configuration(struct vec_voidp *ivshmem_devices,
 
 #ifdef USE_VFIO_NOIOMMU
     ignore_value(ivshmem_devices);
-    ignore_value(group_out);
     if (!vfio_noiommu_is_enabled()) {
         log(LOGL_ERROR, "vIOMMU support for your platform is not implemented and\n"
                 " vfio noiommu mode is not enabled!\n"
@@ -350,7 +366,7 @@ static bool validate_vfio_configuration(struct vec_voidp *ivshmem_devices,
         return false;
     }
 #else
-    if (!validate_iommu_groups(ivshmem_devices, group_out)) {
+    if (!validate_iommu_groups(ivshmem_devices)) {
         log(LOGL_ERROR, "ivshmem devices are not in an isolated IOMMU group!\n"
                 " Please reconfigure your VM to isolate all ivshmem devices.\n"
                 " On ppc64, this means using a separate spapr-pci-host-bridge device\n"
@@ -515,15 +531,109 @@ bool remove_ivshmem_device(struct vec_voidp *devices, char *name) {
     return false;
 }
 
-static int vfio_get_device_fd(struct vfio_data *data, const char *device) {
-    int fd;
-    if ((fd = ioctl(data->group, VFIO_GROUP_GET_DEVICE_FD, device)) < 0) {
-        log(LOGL_ERROR, "Unable to obtain device fd for %s: %m!", device);
-        close(fd);
-        return -1;
+static bool vfio_add_group(struct vfio_data *data, const char *group_path) {
+    int group = open(group_path, O_RDWR);
+    if (group < 0) {
+        log(LOGL_ERROR, "Unable to open vfio group: %m!");
+        goto fail;
     }
 
-    return fd;
+    // Check that the group is viable (this check may be useless in NOIOMMU mode)
+    struct vfio_group_status group_status = { .argsz = sizeof(group_status) };
+    if (ioctl(group, VFIO_GROUP_GET_STATUS, &group_status) < 0) {
+        log(LOGL_ERROR, "Failed to get vfio group status: %m!");
+        goto fail_group_open;
+    }
+    if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
+        log(LOGL_ERROR, "vfio group is not viable!");
+        goto fail_group_open;
+    }
+
+    // Add the group to the group vector
+    struct vfio_group *vgroup = malloc_w(sizeof(struct vfio_group));
+    assert(strlen(vgroup->path) < sizeof(vgroup->path) - 1);
+    strncpy(vgroup->path, group_path, sizeof(vgroup->path) - 1);
+    vgroup->path[sizeof(vgroup->path) - 1] = '\0';
+    vgroup->fd = group;
+    vgroup->refcnt = 0;
+    if (!vec_voidp_push_back(&data->groups, vgroup))
+        goto fail_group_open;
+
+    // Add the group to the container
+    if (ioctl(group, VFIO_GROUP_SET_CONTAINER, &data->container) < 0) {
+        log(LOGL_ERROR, "Failed to set vfio group's container: %m!");
+        goto fail_group_push_back;
+    }
+
+    return true;
+
+fail_group_push_back:
+    vec_voidp_remove(&data->groups, data->groups.count - 1);
+fail_group_open:
+    close(group);
+fail:
+    return false;
+}
+
+static bool vfio_add_all_missing_groups(struct vfio_data *data) {
+    bool ret = false;
+
+    DIR *vfiodir = opendir("/dev/vfio");
+    if (!vfiodir)
+        goto out;
+
+    struct dirent *group;
+    while ((group = readdir(vfiodir))) {
+        if (group->d_name[0] == '.' || strncmp(group->d_name, "vfio", 4) == 0)
+            continue;
+
+        // See if we already have this group
+        char curname[REASONABLE_PATH_LEN];
+        snprintf(curname, sizeof(curname), "/dev/vfio/%s", group->d_name);
+        if (vec_voidp_contains(&data->groups, curname, (voidp_comparator)strcmp))
+            continue;
+
+        // Add this group
+        if (!vfio_add_group(data, curname)) {
+            log(LOGL_ERROR, "Failed to add VFIO group %s: %m!", curname);
+            goto out_opendir;
+        }
+    }
+
+    ret = true;
+
+out_opendir:
+    closedir(vfiodir);
+out:
+    return ret;
+}
+
+static int vfio_get_device_fd(struct vfio_data *data, const char *device, struct vfio_group **group_out) {
+    int fd;
+
+    // Try to get device fd from all existing groups
+    for (size_t i=0; i<data->groups.count; i++) {
+        struct vfio_group *cur = data->groups.data[i];
+        if ((fd = ioctl(cur->fd, VFIO_GROUP_GET_DEVICE_FD, device)) >= 0) {
+            *group_out = cur;
+            return fd;
+        }
+    }
+
+    // Failed, add any missing groups
+    if (!vfio_add_all_missing_groups(data))
+        return -1;
+
+    // Try again
+    for (size_t i=0; i<data->groups.count; i++) {
+        struct vfio_group *cur = data->groups.data[i];
+        if ((fd = ioctl(cur->fd, VFIO_GROUP_GET_DEVICE_FD, device)) >= 0) {
+            *group_out = cur;
+            return fd;
+        }
+    }
+
+    return -1;
 }
 
 /**
@@ -742,7 +852,7 @@ static bool vfio_conn_vec_rebuild(struct vfio_data *data, struct vec_voidp *ivsh
         strncpy(conn->name, device, sizeof(conn->name) - 1);
         conn->name[sizeof(conn->name) - 1] = '\0';
 
-        conn->device_fd = vfio_get_device_fd(data, device);
+        conn->device_fd = vfio_get_device_fd(data, device, &conn->group);
         if (conn->device_fd < 0)
             goto fail_conn;
 
@@ -756,6 +866,9 @@ static bool vfio_conn_vec_rebuild(struct vfio_data *data, struct vec_voidp *ivsh
         // Insert into connection vec
         if (!vec_voidp_push_back(&data->connections, conn))
             goto fail_get_eventfds;
+
+        // Bump parent group refcnt
+        conn->group->refcnt++;
 
         continue;
 
@@ -888,65 +1001,49 @@ fail:
  * @param data        vfio_data struct to initialize
  * @param group_name  name of ivshmem group to use (not used in NOIOMMU)
  */
-static bool vfio_init(struct vfio_data *data, struct vec_voidp *ivshmem_devices,
-                      struct ivshmem_group *ivshmem_group) {
+static bool vfio_init(struct vfio_data *data, struct vec_voidp *ivshmem_devices) {
     int container = open("/dev/vfio/vfio", O_RDWR);
     if (container < 0) {
         log(LOGL_ERROR, "Unable to open vfio container: %m!");
         return false;
     }
+    data->container = container;
 
-#ifdef USE_VFIO_NOIOMMU
-    int group = open("/dev/vfio/noiommu-0", O_RDWR);
-#else
-    char pathbuf[REASONABLE_PATH_LEN];
-    snprintf(pathbuf, sizeof(pathbuf), "/dev/vfio/%s", ivshmem_group->name);
-    int group = open(pathbuf, O_RDWR);
-#endif
-    if (group < 0) {
-        log(LOGL_ERROR, "Unable to open vfio group:  %m!");
+    if (!vec_voidp_init(&data->groups, 10, vfio_group_destructor)) {
+        log(LOGL_ERROR, "Unable to allocate VFIO IOMMU group vector: %m!");
         goto fail_container_open;
     }
 
-    // Check that the group is viable (this check may be useless in NOIOMMU mode)
-    struct vfio_group_status group_status = { .argsz = sizeof(group_status) };
-    if (ioctl(group, VFIO_GROUP_GET_STATUS, &group_status) < 0) {
-        log(LOGL_ERROR, "Failed to get vfio group status: %m!");
-        goto fail_group_open;
-    }
-    if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
-        log(LOGL_ERROR, "vfio group is not viable!");
-        goto fail_group_open;
+    if (!vfio_add_all_missing_groups(data)) {
+        log(LOGL_ERROR, "Failed to open VFIO groups: %m!");
+        goto fail_container_open;
     }
 
-    // Add the group to the container
-    if (ioctl(group, VFIO_GROUP_SET_CONTAINER, &container) < 0) {
-        log(LOGL_ERROR, "Failed to set vfio group's container: %m!");
-        goto fail_group_open;
+    if (data->groups.count == 0) {
+        log(LOGL_ERROR, "No VFIO groups detected!");
+        goto fail_container_open;
     }
 
     // Set IOMMU mode
 #if defined(USE_VFIO_NOIOMMU)
     if (ioctl(container, VFIO_SET_IOMMU, VFIO_NOIOMMU_IOMMU) < 0) {
         log(LOGL_ERROR, "Failed to set NOIOMMU mode on vfio container: %m!");
-        goto fail_group_open;
+        goto fail_container_open;
     }
 #elif defined(USE_VFIO_SPAPR)
     if (ioctl(container, VFIO_SET_IOMMU, VFIO_SPAPR_TCE_IOMMU) < 0) {
         log(LOGL_ERROR, "Failed to set SPAPR IOMMU mode on vfio container: %m!");
-        goto fail_group_open;
+        goto fail_container_open;
     }
 #else
 #error "Unimplemented IOMMU mode"
 #endif
 
     // Construct vector of connections
-    if (!vec_voidp_init(&data->connections, 10, connection_destructor))
-        goto fail_group_open;
+    if (!vec_voidp_init(&data->connections, 10, vfio_connection_destructor))
+        goto fail_container_open;
 
     // Flush data and connect to host daemon
-    data->container = container;
-    data->group = group;
     if (!connect_to_host_daemon(data, ivshmem_devices))
         goto fail_conn_vec;
 
@@ -955,8 +1052,6 @@ static bool vfio_init(struct vfio_data *data, struct vec_voidp *ivshmem_devices,
 
 fail_conn_vec:
     vec_voidp_destroy(&data->connections);
-fail_group_open:
-    close(group);
 fail_container_open:
     close(container);
     return false;
@@ -1089,8 +1184,7 @@ void run_vfio_loop(int mainsoc) {
     }
 
     // Validate vfio configuration
-    struct ivshmem_group group;
-    if (!validate_vfio_configuration(&ivshmem_devices, &group))
+    if (!validate_vfio_configuration(&ivshmem_devices))
         return;
 
     // Confirm that all devices are bound to vfio-pci
@@ -1122,7 +1216,7 @@ void run_vfio_loop(int mainsoc) {
 
     // Initialize vfio
     struct vfio_data vfio;
-    if (!vfio_init(&vfio, &ivshmem_devices, &group))
+    if (!vfio_init(&vfio, &ivshmem_devices))
         goto error;
     g_vfio_data = &vfio;
 
