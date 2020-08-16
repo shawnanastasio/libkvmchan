@@ -87,6 +87,10 @@
 #include "config.h"
 #include "libkvmchan-priv.h"
 
+#ifdef HAVE_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
+
 #define REASONABLE_PATH_LEN 512
 #define IOMMU_GROUP_LENGTH  4
 
@@ -1219,6 +1223,22 @@ void run_vfio_loop(int mainsoc) {
     if (!vfio_init(&vfio, &ivshmem_devices))
         goto error;
     g_vfio_data = &vfio;
+
+#ifdef HAVE_SYSTEMD
+    log(LOGL_INFO, "guest_main: sd_notify");
+    /**
+     * sd_notify(int unset_environment, const char *state);
+     *
+     * If the unset_environment parameter is non-zero, sd_notify() will unset
+     * the $NOTIFY_SOCKET environment variable before returning (regardless of
+     * whether the function call itself succeeded or not). Further calls to
+     * sd_notify() will then fail, but the variable is no longer inherited by
+     * child processes.
+     */
+    if (getenv("NOTIFY_SOCKET")) {
+        sd_notify(1, "READY=1");
+    }
+#endif /* HAVE_SYSTEMD */
 
     // Epoll loop to check for disconnected devices
     struct epoll_event events[5];
