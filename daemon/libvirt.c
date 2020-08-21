@@ -279,7 +279,7 @@ static bool attach_ivshmem_device(virDomainPtr dom, const char *path, uint32_t i
 
     // Fill in arguments for chardev and ivshmem commands
     char chardev_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for the path? */];
-    char ivshmem_buf[sizeof(qmp_new_chardev_format) + 255 /* enough for pci bus? */];
+    char ivshmem_buf[sizeof(qmp_new_ivshmem_format) + 255 /* enough for pci bus? */];
     snprintf(chardev_buf, sizeof(chardev_buf), qmp_new_chardev_format, index, path);
     snprintf(ivshmem_buf, sizeof(ivshmem_buf), qmp_new_ivshmem_format, index);
 
