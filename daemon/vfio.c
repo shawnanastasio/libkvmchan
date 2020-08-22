@@ -68,11 +68,11 @@
 #include <string.h>
 #include <errno.h>
 #include <inttypes.h>
-#include <assert.h>
 
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
@@ -172,6 +172,11 @@ struct vfio_data {
 
 static struct vfio_data *g_vfio_data = NULL;
 static struct vec_voidp *g_ivshmem_devices = NULL;
+static struct {
+    bool initialized;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+} g_init_status;
 
 // Epoll object for all VFIO PCI REQ fds
 static int req_epollfd;
@@ -224,7 +229,7 @@ fail:
 
 static void vfio_group_destructor(void *group_) {
     struct vfio_group *group = group_;
-    assert(group->refcnt == 0);
+    ASSERT(group->refcnt == 0);
     close(group->fd);
 }
 
@@ -551,7 +556,7 @@ static bool vfio_add_group(struct vfio_data *data, const char *group_path) {
 
     // Add the group to the group vector
     struct vfio_group *vgroup = malloc_w(sizeof(struct vfio_group));
-    assert(strlen(vgroup->path) < sizeof(vgroup->path) - 1);
+    ASSERT(strlen(vgroup->path) < sizeof(vgroup->path) - 1);
     strncpy(vgroup->path, group_path, sizeof(vgroup->path) - 1);
     vgroup->path[sizeof(vgroup->path) - 1] = '\0';
     vgroup->fd = group;
@@ -1070,6 +1075,19 @@ static void handle_ipc_message(struct ipc_message *msg) {
         .id = msg->id
     };
 
+    // Make sure VFIO is fully initialized before processing command
+    if (!g_init_status.initialized) {
+        ASSERT(!pthread_mutex_lock(&g_init_status.mutex));
+        if (g_init_status.initialized)
+            goto already_initialized;
+
+        ASSERT(!pthread_cond_wait(&g_init_status.cond, &g_init_status.mutex));
+        ASSERT(g_init_status.initialized);
+
+    already_initialized:
+        ASSERT(!pthread_mutex_unlock(&g_init_status.mutex));
+    }
+
     switch(cmd->command) {
         case VFIO_IPC_CMD_FORWARD_KVMCHAND_MSG:
         {
@@ -1151,6 +1169,10 @@ static struct vfio_connection *get_conn_by_req_eventfd(struct vfio_data *data, i
 }
 
 void run_vfio_loop(int mainsoc) {
+    g_init_status.initialized = false;
+    ASSERT(!pthread_cond_init(&g_init_status.cond, NULL));
+    ASSERT(!pthread_mutex_init(&g_init_status.mutex, NULL));
+
     if ((req_epollfd = epoll_create1(0)) < 0) {
         log(LOGL_ERROR, "Failed to create epollfd: %m!");
         return;
@@ -1219,6 +1241,11 @@ void run_vfio_loop(int mainsoc) {
     if (!vfio_init(&vfio, &ivshmem_devices))
         goto error;
     g_vfio_data = &vfio;
+
+    ASSERT(!pthread_mutex_lock(&g_init_status.mutex));
+    g_init_status.initialized = true;
+    ASSERT(!pthread_cond_signal(&g_init_status.cond));
+    ASSERT(!pthread_mutex_unlock(&g_init_status.mutex));
 
     // Epoll loop to check for disconnected devices
     struct epoll_event events[5];
