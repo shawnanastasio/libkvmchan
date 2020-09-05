@@ -4,7 +4,7 @@ BIN:=libkvmchan.so
 LIBS=-lrt -pthread
 DEBUG:=true
 
-SYSTEMD ?= 1
+SYSTEMD ?= 0
 
 DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
 	daemon/ipc.c daemon/connections.c daemon/localhandler.c
