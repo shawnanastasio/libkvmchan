@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *

@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -491,7 +491,7 @@ static inline size_t ringbuf_free_space(ringbuf_t *rb) {
     else if (rb->pos_start < rb->pos_end)
         return USABLE(rb) - (rb->pos_end - rb->pos_start);
     else // rb->pos_start > rb->pos_end
-        return rb->pos_start - rb->pos_end;
+        return rb->pos_start - rb->pos_end - 1;
 }
 
 static inline size_t ringbuf_available(ringbuf_t *rb) {
@@ -590,7 +590,7 @@ ringbuf_ret_t ringbuf_read(ringbuf_t *rb, void *out, size_t size) {
     // Sec copies handle blocking in their respective wrapper functions.
     if ((rb->flags & RINGBUF_FLAG_BLOCKING) && !(rb->flags & RINGBUF_FLAG_SEC_COPY)) {
         block_read(rb, NULL, size, false, NULL);
-    } else if (ringbuf_available(rb) - ringbuf_free_space(rb) < size) {
+    } else if (ringbuf_available(rb) < size) {
         return RB_NODATA;
     }
 
