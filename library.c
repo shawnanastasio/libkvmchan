@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -264,25 +264,28 @@ static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_M
     //
     // For now, my workaround is to simply sleep and try to obtain the
     // fds afterwards. This is gross and stupid but it works for now.
-    usleep(4 * 1000 * 1000);
 
-    struct kvmchand_ret ret;
-    struct kvmchand_message msg = {
-        .command = KVMCHAND_CMD_GET_CONN_FDS,
-        .args = {
-            ivposition
+    for (size_t tries=0; tries<3; tries++) {
+        struct kvmchand_ret ret;
+        struct kvmchand_message msg = {
+            .command = KVMCHAND_CMD_GET_CONN_FDS,
+            .args = {
+                ivposition
+            }
+        };
+        if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+            return false;
+        if (localmsg_recv(g_state.socfd, &ret, sizeof(ret), fds_out) < 0)
+            return false;
+        if (!ret.error) {
+            return true;
         }
-    };
-    if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
-        return false;
-    if (localmsg_recv(g_state.socfd, &ret, sizeof(ret), fds_out) < 0)
-        return false;
-    if (ret.error) {
-        errno = ENOENT;
-        return false;
+
+        usleep(4 * 1000 * 1000);
     }
 
-    return true;
+    errno = ENOENT;
+    return false;
 }
 
 //

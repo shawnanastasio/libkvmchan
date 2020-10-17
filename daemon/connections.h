@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2020 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -37,15 +37,14 @@ struct connection {
     struct peer server;
     struct peer client;
     uint32_t port;
+    uint64_t read_min;
+    uint64_t write_min;
+    bool free;
 
     // memfd backing shared memory region
     int memfd;
 
     // Notification eventfds
-    // TODO: For now, ownership of these eventfds is handled by ivshmem,
-    // so we don't need to deallocate them in the connection destructor.
-    //
-    // Eventually this should be changed so we own all fds.
     int eventfds[4];
 };
 

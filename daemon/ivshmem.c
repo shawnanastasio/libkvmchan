@@ -225,8 +225,10 @@ fail:
  */
 static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivposition, int *fds_out) {
     struct client_info *info = get_client(server, pid, false, NULL);
-    if (!info)
+    if (!info) {
+        log(LOGL_INFO, "No client found for pid %ld ivposition %d!", pid, ivposition);
         return false;
+    }
 
     struct conn_info *conn = NULL;
     for (size_t i=0; i<info->connections.count; i++) {
@@ -236,8 +238,10 @@ static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivpo
             break;
         }
     }
-    if (!conn)
+    if (!conn) {
+        log(LOGL_INFO, "No connection found for ivposition %d", ivposition);
         return false;
+    }
 
     fds_out[0] = conn->shmfd;
     fds_out[1] = conn->incoming_eventfds[0];

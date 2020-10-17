@@ -41,6 +41,8 @@ static struct vec_voidp connections;
 static void connection_destructor(void *conn_) {
     struct connection *conn = conn_;
     close(conn->memfd);
+    for (size_t i=0; i<ARRAY_SIZE(conn->eventfds); i++)
+        close(conn->eventfds[i]);
 }
 
 bool connections_init(void) {
@@ -50,13 +52,27 @@ bool connections_init(void) {
     return true;
 }
 
-struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port,
+static struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                                           size_t *conn_i_out) {
     for (size_t i=0; i<connections.count; i++) {
         struct connection *cur = connections.data[i];
         if (cur->server.dom == server_dom && cur->client.dom == client_dom && cur->port == port) {
             if (conn_i_out)
                 *conn_i_out = i;
+            return cur;
+        }
+    }
+
+    return NULL;
+}
+
+static struct connection *connections_get_free(uint32_t server_dom, uint32_t client_dom, uint64_t read_min,
+                                               uint64_t write_min) {
+    for (size_t i=0; i<connections.count; i++) {
+        struct connection *cur = connections.data[i];
+        if (cur->free && cur->server.dom == server_dom && cur->client.dom == client_dom &&
+            cur->write_min >= write_min && cur->read_min >= read_min) {
+            // Found a free connection that is big enough to service this request
             return cur;
         }
     }
@@ -129,10 +145,26 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         goto fail;
     }
 
-    // Make sure that there isn't already a vchan on this server/port
-    if (connections_get_by_dom(server_dom, client_dom, port, NULL)) {
+    // Make sure that there isn't already an active connection on this server/port
+    struct connection *existing = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    if (existing && !existing->free) {
         log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
+    }
+
+    // See if there is an existing connection that can be reused
+    existing = connections_get_free(server_dom, client_dom, read_min, write_min);
+    if (existing) {
+        // Re-use this connection
+        log(LOGL_INFO, "Reusing existing vchan connection (previous port: %u)", existing->port);
+        existing->port = port;
+        existing->free = false;
+
+        *ivpos_out = (server_dom > 0) ? existing->server.ivposition : existing->client.ivposition;
+        if (client_dom > 0)
+            *client_pid_out = existing->client.pid;
+
+        return true;
     }
 
     // Calculate size of shm and allocate it
@@ -243,6 +275,9 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     struct connection conn = {
         .server = { .dom = server_dom, .pid = server_pid, .ivposition = server_ivposition },
         .client = { .dom = client_dom, .pid = client_pid, .ivposition = client_ivposition },
+        .read_min = read_min,
+        .write_min = write_min,
+        .free = false,
         .port = port,
         .memfd = memfd,
         .eventfds = {eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
@@ -283,7 +318,7 @@ fail:
 bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 uint32_t *ivpos_out, pid_t *pid_out) {
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (!conn) {
+    if (!conn || conn->free) {
         log(LOGL_WARN, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
         return false;
@@ -319,50 +354,12 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
             server_dom, port);
         return false;
     }
+    ASSERT(!conn->free);
 
-    // Disconnect ivshmem device from VMs with libvirt
-    struct ipc_message resp, msg = {
-        .type = IPC_TYPE_CMD,
-        .cmd = {
-            .command = LIBVIRT_IPC_CMD_DETACH_IVSHMEM,
-            .args = {
-                (conn->server.dom == 0) ? -1 : (int64_t)conn->server.dom,
-                (conn->client.dom == 0) ? -1 : (int64_t)conn->client.dom,
-                (int64_t)conn->server.ivposition,
-                (int64_t)conn->client.ivposition,
-            }
-        },
-        .dest = IPC_DEST_LIBVIRT,
-        .flags = IPC_FLAG_WANTRESP,
-    };
-    if (!ipc_send_message(&msg, &resp)) {
-        log(LOGL_ERROR, "Failed to send IPC message to libvirt: %m.");
-        return false;
-    }
-    if (resp.resp.error) {
-        log(LOGL_ERROR, "libvirt failed to detach ivshmem devices!");
-        return false;
-    }
-
-    // Unregister connections with ivshmem
-    msg.cmd.command = IVSHMEM_IPC_CMD_UNREGISTER_CONN;
-    msg.cmd.args[0] = conn->server.pid;
-    msg.cmd.args[1] = conn->client.pid;
-    msg.cmd.args[2] = conn->server.ivposition;
-    msg.cmd.args[3] = conn->client.ivposition;
-    msg.dest = IPC_DEST_IVSHMEM;
-    msg.flags = IPC_FLAG_WANTRESP;
-    if (!ipc_send_message(&msg, &resp)) {
-        log(LOGL_ERROR, "Failed to send IPC message to ivshmem: %m.");
-        return false;
-    }
-    if (resp.resp.error) {
-        log(LOGL_ERROR, "ivshmem failed to unregister connections!\n");
-        return false;
-    }
-
-    // Finally, delete the connection from our local list
-    vec_voidp_remove(&connections, conn_i);
+    // Mark the connection as free so that it can be reused.
+    // This means that vchans are only truly destroyed when a guest involved shuts down
+    // which is fine for now, but may need to be changed eventually.
+    conn->free = true;
 
     return true;
 }
