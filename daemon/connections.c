@@ -313,15 +313,22 @@ fail:
  * @param      port       port number
  * @param[out] ivpos_out  client ivposition
  * @param[out] pid_out    qemu PID of client, or of server client is dom 0
- * @return                success?
+ * @return                connections_error status code
  */
-bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
-                uint32_t *ivpos_out, pid_t *pid_out) {
+enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
+                                  uint32_t *ivpos_out, pid_t *pid_out) {
+    // Make sure server_dom is online if it's not dom0
+    if (server_dom != 0 && get_domain_pid(server_dom) < 0) {
+        log(LOGL_INFO, "Tried to connect to offline server domain %"PRIu32, server_dom);
+        return CONNECTIONS_ERROR_DOM_OFFLINE;
+    }
+
+    // Find corresponding vchan
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
     if (!conn || conn->free) {
-        log(LOGL_WARN, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
+        log(LOGL_INFO, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
-        return false;
+        return CONNECTIONS_ERROR_BAD_PORT;
     }
 
     if (client_dom == 0) {
@@ -335,7 +342,7 @@ bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         *pid_out = conn->client.pid;
     }
 
-    return true;
+    return CONNECTIONS_ERROR_NONE;
 }
 
 /**

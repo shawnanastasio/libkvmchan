@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -38,6 +38,7 @@
 #include "util.h"
 #include "ipc.h"
 #include "config.h"
+#include "connections.h"
 #include "libkvmchan-priv.h"
 
 #ifdef HAVE_SYSTEMD
@@ -356,7 +357,7 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
 
 static bool handle_client_message_dom0(struct client *client, struct kvmchand_message *msg) {
     int fd = client->fd;
-    struct kvmchand_ret ret = { .error = true };
+    struct kvmchand_ret ret = { .error = true, .ret = KVMCHAND_ERR_FAILURE };
     int fds[KVMCHAND_FD_MAX];
 
     // Initialize fds to -1 to avoid clang scan-build warning
@@ -439,8 +440,13 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             struct ipc_message ipc_resp;
             if (!ipc_send_message(&ipc_msg, &ipc_resp))
                 goto out;
-            if (ipc_resp.resp.error)
+            if (ipc_resp.resp.error) {
+                switch (ipc_resp.resp.ret) {
+                    case CONNECTIONS_ERROR_DOM_OFFLINE:
+                        ret.ret = KVMCHAND_CMD_HELLO;
+                }
                 goto out;
+            }
 
             // Get all file descriptors for the connection
             ipc_msg.cmd.command = IVSHMEM_IPC_CMD_GET_CONN_FDS;

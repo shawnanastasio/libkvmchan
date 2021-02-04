@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -99,9 +99,10 @@ struct ipc_message {
  * args[1] - (u32) domain # of client
  * args[2] - (u32) port
  *
- * resp.error - error?
- * resp.ret   - (u32) IVPosition of ivshmem device, or 0 if local
- * resp.ret2  - (pid_t) PID of server qemu process (if remote)
+ * resp.ret        - (u32) On success, IVPosition of ivshmem device, or 0 if local
+ *                         On failure, `enum connections_error` code.
+ * resp.ret2       - (pid_t) PID of server qemu process (if remote)
+ * resp.error      - error?
  */
 #define MAIN_IPC_CMD_VCHAN_CONN 1
 

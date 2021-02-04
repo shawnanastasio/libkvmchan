@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -333,7 +333,7 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
     }
 
     // Handle command and send response
-    struct kvmchand_ret ret = { .error = true };
+    struct kvmchand_ret ret = { .error = true, .ret = KVMCHAND_ERR_FAILURE };
     switch(msg.command) {
         case KVMCHAND_CMD_HELLO:
             ret.ret = KVMCHAND_API_VERSION;

@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -111,6 +111,10 @@ struct kvmchand_message {
 struct kvmchand_ret {
     int64_t ret;
     bool error;
+
+    // Error codes, stored in `ret` when `error` is true
+#define KVMCHAND_ERR_FAILURE    0 // Generic failure
+#define KVMCHAND_ERR_DOMOFFLINE 1 // Domain offline
 
     uint8_t fd_count; // Number of file descriptors returned
 #define KVMCHAND_FD_MAX 5

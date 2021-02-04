@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -39,6 +39,8 @@
 #include "libkvmchan.h"
 #include "libkvmchan-priv.h"
 #include "ringbuf.h"
+
+#define CLIENT_INIT_RETRY_US (1 * 1000 * 1000)
 
 // Represents global library state.
 struct libkvmchan_state {
@@ -394,7 +396,7 @@ out:
     return ret;
 }
 
-struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port) {
+static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t port) {
     struct libkvmchan *ret = NULL;
     if ((errno = pthread_mutex_lock(&g_state.mutex)))
         return NULL;
@@ -428,7 +430,11 @@ struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port) {
     if (localmsg_recv(g_state.socfd, &dret, sizeof(dret), fds) < 0)
         goto out_fail_malloc_ret;
     if (dret.error) {
-        errno = EINVAL;
+        if (dret.ret == KVMCHAND_ERR_DOMOFFLINE)
+            errno = EINVAL;
+        else
+            // Domain is online but vchan connection failed - try again
+            errno = EAGAIN;
         goto out_fail_malloc_ret;
     }
 
@@ -494,6 +500,22 @@ out_fail_malloc_ret:
     ret = NULL;
 out:
     pthread_mutex_unlock(&g_state.mutex);
+    return ret;
+}
+
+/**
+ * Connect to an existing vchan. Wraps private libkvmchan_client_init_impl and
+ * automatically retries if the domain is online but the vchan is unavailable.
+ */
+struct libkvmchan *libkvmchan_client_init(uint32_t domain, uint32_t port) {
+    struct libkvmchan *ret = NULL;
+
+    ret = libkvmchan_client_init_impl(domain, port);
+    while (!ret && errno == EAGAIN) {
+        usleep(CLIENT_INIT_RETRY_US);
+        ret = libkvmchan_client_init_impl(domain, port);
+    }
+
     return ret;
 }
 

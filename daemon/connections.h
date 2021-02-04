@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -27,6 +27,12 @@
 
 #include "util.h"
 
+enum connections_error {
+    CONNECTIONS_ERROR_NONE,
+    CONNECTIONS_ERROR_DOM_OFFLINE,
+    CONNECTIONS_ERROR_BAD_PORT,
+};
+
 struct peer {
     uint32_t dom;        // Domain ID
     pid_t pid;           // PID of QEMU if remote, or -1
@@ -52,7 +58,7 @@ bool connections_init(void);
 bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 uint64_t read_min, uint64_t write_min, uint32_t *ivpos_out,
                 pid_t *client_pid_out);
-bool vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
+enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 uint32_t *ivpos_out, pid_t *pid_out);
 bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 bool vchan_unregister_domain(pid_t pid);

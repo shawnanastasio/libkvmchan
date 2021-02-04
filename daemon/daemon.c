@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -254,10 +254,16 @@ static void handle_message(struct ipc_message *msg) {
             break;
 
         case MAIN_IPC_CMD_VCHAN_CONN:
-            response.resp.error = !vchan_conn((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
-                                              (uint32_t)cmd->args[2], (uint32_t *)&response.resp.ret,
-                                              (pid_t *)&response.resp.ret2);
+        {
+            enum connections_error err = vchan_conn((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
+                                                    (uint32_t)cmd->args[2], (uint32_t *)&response.resp.ret,
+                                                    (pid_t *)&response.resp.ret2);
+            response.resp.error = err != CONNECTIONS_ERROR_NONE;
+            if (response.resp.error)
+                response.resp.ret = err;
+
             break;
+        }
 
         case MAIN_IPC_CMD_VCHAN_CLOSE:
             response.resp.error = !vchan_close((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
