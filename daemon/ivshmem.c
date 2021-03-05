@@ -92,7 +92,14 @@ struct ivshmem_server {
     struct vec_voidp clients; // client_info vec
 };
 
-struct ivshmem_server g_server;
+static struct {
+    bool initialized;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+} g_init_status;
+
+static struct ivshmem_server g_server;
+static int g_request_sem_eventfd = -1;
 
 /**
  * Send an ivshmem protocol message to a given socket.
@@ -488,7 +495,13 @@ static void *conn_listener_thread(void *client_) {
             if (cur_fd == client->listener_eventfd)
                 goto fail_epoll_create;
 
-            if (!handle_kvmchand_message(client, conn)) {
+            // Obtain client request semaphore and handle message
+            if (!eventfd_sem_wait_or(g_request_sem_eventfd, client->listener_eventfd))
+                goto fail_epoll_create; // listener kill eventfd notified - time to exit
+            bool res = handle_kvmchand_message(client, conn);
+            eventfd_sem_post(g_request_sem_eventfd);
+
+            if (!res) {
                 log(LOGL_ERROR, "Couldn't handle message from client! Continuing...");
                 continue;
             }
@@ -830,6 +843,26 @@ static void handle_ipc_message(struct ipc_message *msg) {
             break;
         }
 
+        case IVSHMEM_IPC_CMD_START_LISTENING:
+        {
+            if (msg->fd_count != 1) {
+                log(LOGL_ERROR, "Received invalid CMD_START_LISTENING: wrong # of fds provided\n");
+                response.resp.error = true;
+                break;
+            }
+
+            // Save eventfd and signal to main thread that it can start listening
+            g_request_sem_eventfd = msg->fds[0];
+
+            ASSERT(!pthread_mutex_lock(&g_init_status.mutex));
+            g_init_status.initialized = true;
+            ASSERT(!pthread_cond_signal(&g_init_status.cond));
+            ASSERT(!pthread_mutex_unlock(&g_init_status.mutex));
+
+            response.resp.error = false;
+            break;
+        }
+
         default:
             log_BUG("Unknown IPC command received in ivshmem loop: %"PRIu64, cmd->command);
     }
@@ -841,6 +874,10 @@ static void handle_ipc_message(struct ipc_message *msg) {
 }
 
 void run_ivshmem_loop(int mainsoc) {
+    g_init_status.initialized = false;
+    ASSERT(!pthread_cond_init(&g_init_status.cond, NULL));
+    ASSERT(!pthread_mutex_init(&g_init_status.mutex, NULL));
+
     if (!ipc_start(mainsoc, IPC_DEST_IVSHMEM, handle_ipc_message))
         goto error;
 
@@ -877,6 +914,19 @@ void run_ivshmem_loop(int mainsoc) {
     g_server.socfd = socfd;
     if (!vec_voidp_init(&g_server.clients, 10, client_info_destructor))
         goto error;
+
+    // Wait for CMD_START_LISTENING before entering the event loop
+    if (!g_init_status.initialized) {
+        ASSERT(!pthread_mutex_lock(&g_init_status.mutex));
+        if (g_init_status.initialized)
+            goto already_initialized;
+
+        ASSERT(!pthread_cond_wait(&g_init_status.cond, &g_init_status.mutex));
+        ASSERT(g_init_status.initialized);
+
+    already_initialized:
+        ASSERT(!pthread_mutex_unlock(&g_init_status.mutex));
+    }
 
     // Poll for events
     struct epoll_event events[5];

@@ -598,6 +598,29 @@ void run_localhandler_loop(int mainsoc, bool is_dom0) {
     }
 #endif /* HAVE_SYSTEMD */
 
+    // Now that we're initialized, create a semaphore eventfd and send it to ivshmem
+    // so that it can begin handling guest requests as well.
+    int request_sem_eventfd = eventfd_sem_init(1);
+    if (request_sem_eventfd < 0)
+        goto error;
+
+    struct ipc_message ipc_msg = {
+        .type = IPC_TYPE_CMD,
+        .cmd = {
+            .command = IVSHMEM_IPC_CMD_START_LISTENING,
+        },
+        .fd_count = 1,
+        .fds = {request_sem_eventfd},
+        .dest = IPC_DEST_IVSHMEM,
+        .flags = IPC_FLAG_WANTRESP | IPC_FLAG_FD,
+    };
+
+    struct ipc_message ipc_resp;
+    if (!ipc_send_message(&ipc_msg, &ipc_resp))
+        goto error;
+    if (ipc_resp.resp.error)
+        goto error;
+
     // Poll for events
     struct epoll_event events[5];
     int event_count;
@@ -650,8 +673,12 @@ void run_localhandler_loop(int mainsoc, bool is_dom0) {
                 if (!client)
                     log_BUG("Failed to find client!");
 
-                // Valid message received, handle it
-                if (!handle_client_message(client, &msg))
+                // Valid message received, obtain client request semaphore and handle it
+                eventfd_sem_wait(request_sem_eventfd);
+                bool res = handle_client_message(client, &msg);
+                eventfd_sem_post(request_sem_eventfd);
+
+                if (!res)
                     if (!remove_connection(&data, fd))
                         log(LOGL_WARN, "Failed to delete client.");
            }

@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 
 #include "util.h"
 
@@ -263,5 +264,59 @@ ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out) {
 
 out:
     return s;
+}
+
+int eventfd_sem_init(uint64_t initial_value) {
+    return eventfd(initial_value, EFD_SEMAPHORE | EFD_NONBLOCK);
+}
+
+void eventfd_sem_post(int evfd) {
+    uint64_t buf = 1;
+    ASSERT(write(evfd, &buf, sizeof(buf)) >= 0);
+}
+
+void eventfd_sem_wait(int evfd) {
+    uint64_t buf;
+    fd_set rfds;
+    for (;;) {
+        FD_ZERO(&rfds);
+        FD_SET(evfd, &rfds);
+        ASSERT(select(evfd + 1, &rfds, NULL, NULL, NULL) >= 0);
+
+        if (FD_ISSET(evfd, &rfds)) {
+            // The eventfd was ready for read, though it is possible
+            // that in the time since select(2)'s return someone else acquired
+            // the lock, so we have to be prepared to loop again in case of failure.
+            if (read(evfd, &buf, sizeof(buf)) >= 0)
+                break; // Success
+        }
+    }
+}
+
+/**
+ * Wait for a semaphore eventfd to become readable OR for another fd to become readable.
+ *
+ * @return whether the eventfd was the one that became readable
+ */
+bool eventfd_sem_wait_or(int evfd, int other) {
+    uint64_t buf;
+    fd_set rfds;
+    for (;;) {
+        FD_ZERO(&rfds);
+        FD_SET(evfd, &rfds);
+        FD_SET(other, &rfds);
+        ASSERT(select(MAX(evfd, other) + 1, &rfds, NULL, NULL, NULL) >= 0);
+
+        if (FD_ISSET(evfd, &rfds)) {
+            // The eventfd was ready for read, though it is possible
+            // that in the time since select(2)'s return someone else acquired
+            // the lock, so we have to be prepared to loop again in case of failure.
+            if (read(evfd, &buf, sizeof(buf)) >= 0)
+                return true;
+        } else if (FD_ISSET(other, &rfds)) {
+            // `other` is ready for read - return early
+            return false;
+        }
+    }
 }
 

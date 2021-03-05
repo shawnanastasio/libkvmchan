@@ -209,11 +209,11 @@ struct ipc_message {
  * args[1] - (u32) IVPosition of connection
  *
  * resp.error - error?
- * fds[0] - memfd
- * fds[1] - incoming eventfd 0
- * fds[2] - incoming eventfd 1
- * fds[3] - outgoing eventfd 0
- * fds[4] - outgoing eventfd 1
+ * resp.fds[0] - memfd
+ * resp.fds[1] - incoming eventfd 0
+ * resp.fds[2] - incoming eventfd 1
+ * resp.fds[3] - outgoing eventfd 0
+ * resp.fds[4] - outgoing eventfd 1
  */
 #define IVSHMEM_IPC_CMD_GET_CONN_FDS 1
 
@@ -227,6 +227,14 @@ struct ipc_message {
  * resp.error - error?
  */
 #define IVSHMEM_IPC_CMD_UNREGISTER_CONN 2
+
+/**
+ * Start listening for kvmchand requests from guests.
+ * fds[0] - Semaphore eventfd (EFD_SEMAPHORE) that must be held while processing requests.
+ *          Shared with localhandler to ensure that only one is processing client requests at
+ *          a given time.
+ */
+#define IVSHMEM_IPC_CMD_START_LISTENING 3
 
 // VFIO process commands
 

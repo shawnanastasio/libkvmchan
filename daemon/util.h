@@ -30,6 +30,8 @@
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+
 // Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
 #if __has_include(<sys/memfd.h>)
 #include <sys/memfd.h>
@@ -107,6 +109,11 @@ bool str_is_number(const char *str);
 
 int add_epoll_fd(int epoll_fd, int fd, int event);
 int del_epoll_fd(int epoll_fd, int fd);
+
+int eventfd_sem_init(uint64_t initial_value);
+void eventfd_sem_post(int evfd);
+void eventfd_sem_wait(int evfd);
+bool eventfd_sem_wait_or(int evfd, int other);
 
 bool install_exit_callback(void (*func)(void*), void *arg);
 void run_exit_callbacks(void);
