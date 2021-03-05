@@ -284,6 +284,40 @@ static void handle_message(struct ipc_message *msg) {
     }
 }
 
+/**
+ * Fork a child process and run its main loop.
+ *
+ * This is implemented as a macro to allow aribtrary argument forwarding to
+ * the main loop function via C99 variadic macros.
+ *
+ * @param name        string literal name of child used for debugging purposes
+ * @param sockpair    array of sockets used for IPC
+ * @param main        main function to call after fork and setup
+ * @param ...         extra arguments to pass to main function
+ * @return            pid of child process, or -1 on failure.
+ */
+#define spawn_child_loop(name, sockpair, main, ...) \
+    ({ \
+        pid_t p = fork(); \
+        if (p == 0) { \
+            /* Get notified when parent exits */ \
+            prctl(PR_SET_PDEATHSIG, SIGHUP); \
+            /* Set process name */ \
+            const char *pr_name = "kvmchand_" name; \
+            prctl(PR_SET_NAME, (unsigned long)pr_name, 0, 0, 0); \
+            /* Close unused socketpair fd */ \
+            close(sockpair[0]); \
+            /* Call main loop */ \
+            main(sockpair[1], ##__VA_ARGS__); \
+            /* NOTREACHED */ \
+            bail_out(); \
+        } else if (p > 0) { \
+            /* Close unused socketpair fd */ \
+            close(sockpair[1]); \
+        } \
+        p; \
+    })
+
 // Entry point for daemon when run in host mode
 static void host_main(void) {
     // Spawn processes for libvirt and ivshmem event loops.
@@ -302,57 +336,19 @@ static void host_main(void) {
     pid_t libvirt, ivshmem, localhandler;
 
     // Spawn libvirt process
-    if ((libvirt = fork()) < 0) {
+    libvirt = spawn_child_loop("libvirt", main_libvirt_sv, run_libvirt_loop, LIBVIRT_HOST_URI);
+    if (libvirt < 0)
         goto fail_errno;
-    } else if (libvirt == 0) {
-        // Get notified when parent exits
-        prctl(PR_SET_PDEATHSIG, SIGHUP);
-
-        // Close unused socketpair fds
-        close(main_libvirt_sv[0]);
-
-        run_libvirt_loop(main_libvirt_sv[1], LIBVIRT_HOST_URI);
-
-        // NOTREACHED
-        bail_out();
-    }
 
     // Spawn ivshmem process
-    if ((ivshmem = fork()) < 0) {
+    ivshmem = spawn_child_loop("ivshmem", main_ivshmem_sv, run_ivshmem_loop);
+    if (ivshmem < 0)
         goto fail_errno;
-    } else if (ivshmem == 0) {
-        // Get notified when parent exits
-        prctl(PR_SET_PDEATHSIG, SIGHUP);
-
-        // Close unused socketpair fds
-        close(main_ivshmem_sv[0]);
-
-        run_ivshmem_loop(main_ivshmem_sv[1]);
-
-        // NOTREACHED
-        bail_out();
-    }
 
     // Spawn localhandler process
-    if ((localhandler = fork()) < 0) {
+    localhandler = spawn_child_loop("localhandler", main_localhandler_sv, run_localhandler_loop, true);
+    if (localhandler < 0)
         goto fail_errno;
-    } else if (localhandler == 0) {
-        // Get notified when parent exits
-        prctl(PR_SET_PDEATHSIG, SIGHUP);
-
-        // Close unused socketpair fds
-        close(main_localhandler_sv[0]);
-
-        run_localhandler_loop(main_localhandler_sv[1], true);
-
-        // NOTREACHED
-        bail_out();
-    }
-
-    // Close unused fds
-    close(main_libvirt_sv[1]);
-    close(main_ivshmem_sv[1]);
-    close(main_localhandler_sv[1]);
 
     // Initialize connections database
     if (!connections_init())
@@ -383,42 +379,17 @@ static void guest_main(void) {
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, main_localhandler_sv) < 0)
         goto fail_errno;
 
-    // Spawn VFIO process
     pid_t vfio, localhandler;
-    if ((vfio = fork()) < 0) {
+
+    // Spawn VFIO process
+    vfio = spawn_child_loop("vfio", main_vfio_sv, run_vfio_loop);
+    if (vfio < 0)
         goto fail_errno;
-    } else if (vfio == 0) {
-        // Get notified when parent exits
-        prctl(PR_SET_PDEATHSIG, SIGHUP);
-
-        // Close unused socketpair fds
-        close(main_vfio_sv[0]);
-
-        run_vfio_loop(main_vfio_sv[1]);
-
-        // NOTREACHED
-        bail_out();
-    }
 
     // Spawn localhandler process
-    if ((localhandler = fork()) < 0) {
+    localhandler = spawn_child_loop("localhandler", main_localhandler_sv, run_localhandler_loop, false);
+    if (localhandler < 0)
         goto fail_errno;
-    } else if (localhandler == 0) {
-        // Get notified when parent exits
-        prctl(PR_SET_PDEATHSIG, SIGHUP);
-
-        // Close unused socketpair fds
-        close(main_localhandler_sv[0]);
-
-        run_localhandler_loop(main_localhandler_sv[1], false);
-
-        // NOTREACHED
-        bail_out();
-    }
-
-    // Close unused fds
-    close(main_vfio_sv[1]);
-    close(main_localhandler_sv[1]);
 
     // listen for messages
     int sockets[NUM_IPC_SOCKETS];
