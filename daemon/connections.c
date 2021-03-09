@@ -70,14 +70,30 @@ static struct connection *connections_get_free(uint32_t server_dom, uint32_t cli
                                                uint64_t write_min) {
     for (size_t i=0; i<connections.count; i++) {
         struct connection *cur = connections.data[i];
-        if (cur->free && cur->server.dom == server_dom && cur->client.dom == client_dom &&
-            cur->write_min >= write_min && cur->read_min >= read_min) {
+        if (cur->free &&
+                (cur->server.dom == server_dom || cur->server.dom == client_dom) &&
+                (cur->client.dom == client_dom || cur->client.dom == server_dom) &&
+                cur->write_min >= write_min && cur->read_min >= read_min) {
             // Found a free connection that is big enough to service this request
             return cur;
         }
     }
 
     return NULL;
+}
+
+static void connections_swap_for_reuse(struct connection *conn, uint32_t server_dom, uint32_t client_dom) {
+    ASSERT(conn->server.dom == server_dom || conn->server.dom == client_dom);
+    ASSERT(conn->client.dom == client_dom || conn->client.dom == server_dom);
+    if (conn->server.dom == server_dom)
+        // No swapping necessary
+        return;
+
+    // Swap server and client
+    struct peer tmp;
+    memcpy(&tmp, &conn->server, sizeof(struct peer));
+    memcpy(&conn->server, &conn->client, sizeof(struct peer));
+    memcpy(&conn->client, &tmp, sizeof(struct peer));
 }
 
 static bool connections_add(struct connection *conn) {
@@ -159,6 +175,10 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         log(LOGL_INFO, "Reusing existing vchan connection (previous port: %u)", existing->port);
         existing->port = port;
         existing->free = false;
+
+        // Sometimes we may be re-using a connection with swapped server/client domains, so
+        // swap them again to match this connection.
+        connections_swap_for_reuse(existing, server_dom, client_dom);
 
         *ivpos_out = (server_dom > 0) ? existing->server.ivposition : existing->client.ivposition;
         if (client_dom > 0)
