@@ -22,18 +22,20 @@
  * between VMs and the host.
  */
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
 #include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
-#include <unistd.h>
-#include <sys/types.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "util.h"
-#include "ipc.h"
 #include "connections.h"
+#include "ipc.h"
 #include "libkvmchan-priv.h"
 #include "libkvmchan.h"
 
@@ -131,6 +133,40 @@ static pid_t get_domain_pid(uint32_t dom) {
 }
 
 /**
+ * Zero out a memfd's memory region so that it can be re-used for a new vchan
+ */
+static bool clear_memfd_for_reuse(int memfd) {
+    bool res = false;
+
+    struct stat statbuf;
+    if (fstat(memfd, &statbuf) < 0)
+        goto out;
+    if (statbuf.st_size == 0)
+        goto out;
+
+    void *region = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, memfd, 0);
+    if (region == (void *)-1)
+        goto out;
+
+    // Use explicit_bzero to clear the shared memory region.
+    // This should guarantee that we don't get optimized away.
+    explicit_bzero(region, statbuf.st_size);
+
+    if (munmap(region, statbuf.st_size) < 0)
+        goto out;
+
+    res = true;
+out:
+    if (!res)
+        log(LOGL_ERROR, "BUG? Failed to clear memfd for reuse! (errno=%m)");
+    return res;
+}
+
+static bool conn_is_in_use(struct connection *conn) {
+    return conn->state != CONNECTION_STATE_FREE && conn->state != CONNECTION_STATE_UNUSABLE;
+}
+
+/**
  * High-level vchan API
  */
 
@@ -174,6 +210,18 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     if (existing) {
         // Re-use this connection
         log(LOGL_INFO, "Reusing existing vchan connection (previous port: %u)", existing->port);
+
+        // Clear the data
+        if (!clear_memfd_for_reuse(existing->memfd)) {
+            // Failed to securely wipe the old connection's shared memory region,
+            // mark the connection as unusable and fail
+            log(LOGL_WARN, "Marking old connection (server dom %"PRIu32
+                           ", client dom %"PRIu32", port %"PRIu32") as UNUSABLE!",
+                           existing->server.dom, existing->client.dom, existing->port);
+            existing->state = CONNECTION_STATE_UNUSABLE;
+            return false;
+        }
+
         existing->port = port;
         existing->server_connected = true;
         existing->client_connected = false;
@@ -350,7 +398,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
 
     // Find corresponding vchan
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (!conn || conn->state == CONNECTION_STATE_FREE) {
+    if (!conn || !conn_is_in_use(conn)) {
         log(LOGL_INFO, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
         return CONNECTIONS_ERROR_BAD_PORT;
@@ -391,7 +439,7 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
             server_dom, port);
         return false;
     }
-    if (conn->state == CONNECTION_STATE_FREE) {
+    if (!conn_is_in_use(conn)) {
         log(LOGL_WARN, "BUG? Tried to close already-closed vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
         return false;
@@ -439,7 +487,7 @@ enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t cli
     log(LOGL_INFO, "Recorded vchan client disconnect at server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
         server_dom, client_dom, port);
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (!conn || conn->state == CONNECTION_STATE_FREE)
+    if (!conn || !conn_is_in_use(conn))
         return CONNECTIONS_ERROR_NOT_FOUND;
 
     if (!conn->client_connected) {
@@ -468,7 +516,7 @@ enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t cli
  */
 int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (!conn || conn->state == CONNECTION_STATE_FREE)
+    if (!conn || !conn_is_in_use(conn))
         return VCHAN_DISCONNECTED;
 
     switch (conn->state) {

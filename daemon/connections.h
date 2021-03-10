@@ -55,6 +55,7 @@ struct connection {
 #define CONNECTION_STATE_WAITING      1
 #define CONNECTION_STATE_CONNECTED    2
 #define CONNECTION_STATE_DISCONNECTED 3
+#define CONNECTION_STATE_UNUSABLE     4
 
     // memfd backing shared memory region
     int memfd;
