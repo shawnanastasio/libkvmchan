@@ -52,6 +52,17 @@ int write_wrapper(struct libkvmchan *chan, void *data, size_t size) {
     return written;
 }
 
+const char *vchan_state_str(int state) {
+    switch (state) {
+        case -1: return "FAILED_TO_CONTACT_KVMCHAND";
+        case VCHAN_DISCONNECTED: return "VCHAN_DISCONNECTED";
+        case VCHAN_CONNECTED: return "VCHAN_CONNECTED";
+        case VCHAN_WAITING: return "VCHAN_WAITING";
+        default:
+            return "(unknown)";
+    }
+}
+
 
 typedef int (*read_func_t)(struct libkvmchan *chan, void *data, size_t size);
 typedef int (*write_func_t)(struct libkvmchan *chan, void *data, size_t size);
@@ -77,6 +88,10 @@ void do_test(bool client, int domain_no, int port_no, read_func_t read_func, wri
 
             printf("Sent message to server!\n");
 
+            // Get the state of the vchan
+            int state = libkvmchan_get_state(chan);
+            printf("vchan state: %s\n", vchan_state_str(state));
+
             usleep(1 * 1000 * 1000);
         }
 
@@ -84,6 +99,9 @@ void do_test(bool client, int domain_no, int port_no, read_func_t read_func, wri
         chan = libkvmchan_server_init(domain_no, port_no, 100, 100);
         if (!chan)
             perror_e("libkvmchan_server_init");
+
+        int state = libkvmchan_get_state(chan);
+        printf("vchan state after init: %s\n", vchan_state_str(state));
 
         // Wait for messages from client and print them out
         char str_buf[256];
@@ -107,11 +125,20 @@ void do_test(bool client, int domain_no, int port_no, read_func_t read_func, wri
             printf("Got message: %s\n", str_buf);
             libkvmchan_clear_eventfd(chan);
 
+            int state = libkvmchan_get_state(chan);
+            printf("vchan state: %s\n", vchan_state_str(state));
+
             usleep(1 * 1000 * 1000);
         }
+
+        printf("Done. Waiting 5s and probing state\n");
+        usleep(5 * 1000 * 1000);
+
+        state = libkvmchan_get_state(chan);
+        printf("vchan state: %s\n", vchan_state_str(state));
     }
 
-    printf("Done. Closing vchan.\n");
+    printf("Closing vchan.\n");
     if (!libkvmchan_close(chan))
         perror_e("libkvmchan_close");
 }

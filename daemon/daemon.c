@@ -261,7 +261,6 @@ static void handle_message(struct ipc_message *msg) {
             response.resp.error = err != CONNECTIONS_ERROR_NONE;
             if (response.resp.error)
                 response.resp.ret = err;
-
             break;
         }
 
@@ -272,6 +271,16 @@ static void handle_message(struct ipc_message *msg) {
 
         case MAIN_IPC_CMD_UNREGISTER_DOM:
             response.resp.error = !vchan_unregister_domain((pid_t)cmd->args[0]);
+            break;
+
+        case MAIN_IPC_CMD_VCHAN_CLIENT_DISCONNECT:
+            response.resp.ret = vchan_client_disconnect((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2]);
+            response.resp.error = response.resp.ret != CONNECTIONS_ERROR_NONE;
+            break;
+
+        case MAIN_IPC_CMD_VCHAN_GET_STATE:
+            response.resp.ret = vchan_get_state((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2]);
+            response.resp.error = false;
             break;
 
         default:

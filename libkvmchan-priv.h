@@ -102,6 +102,31 @@ struct kvmchand_message {
      */
 #define KVMCHAND_CMD_CLOSE 4
 
+    /**
+     * Register a client disconnect on a vchan.
+     * arg0 (u32) - domain # of server
+     * arg1 (u32) - port
+     */
+#define KVMCHAND_CMD_CLIENT_DISCONNECT 5
+
+    /**
+     * Get the state of a vchan (client's perspective)
+     * arg0 (u32) - domain # of server
+     * arg1 (u32) - port
+     *
+     * ret (int) - VCHAN_{DISCONNECTED,CONNECTED,WAITING}
+     */
+#define KVMCHAND_CMD_GET_STATE_CLIENT 6
+
+    /**
+     * Get the state of a vchan (server's perspective)
+     * arg0 (u32) - domain # of client
+     * arg1 (u32) - port
+     *
+     * ret (int) - VCHAN_{DISCONNECTED,CONNECTED,WAITING}
+     */
+#define KVMCHAND_CMD_GET_STATE_SERVER 7
+
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
 

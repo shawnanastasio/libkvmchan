@@ -24,6 +24,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* vchan state values from libkvmchan_get_state */
+#define VCHAN_DISCONNECTED 0 /* remote disconnected or remote domain dead */
+#define VCHAN_CONNECTED    1 /* connected */
+#define VCHAN_WAITING      2 /* vchan server initialized, waiting for client to connect */
+
 #define LIBKVMCHAN_EXPORTED __attribute__((__visibility__("default")))
 
 struct libkvmchan;
@@ -42,5 +47,6 @@ LIBKVMCHAN_EXPORTED void libkvmchan_clear_eventfd(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED bool libkvmchan_close(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED size_t libkvmchan_data_ready(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED size_t libkvmchan_buffer_space(struct libkvmchan *chan);
+LIBKVMCHAN_EXPORTED int libkvmchan_get_state(struct libkvmchan *chan);
 
 #endif // LIBKVMCHAN_H

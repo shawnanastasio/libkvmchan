@@ -687,6 +687,20 @@ bool libkvmchan_close(struct libkvmchan *chan) {
             goto out;
         if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL) < 0)
             goto out;
+    } else {
+        // Send message to daemon to record disconnect
+        struct kvmchand_ret kret;
+        struct kvmchand_message msg = {
+            .command = KVMCHAND_CMD_CLIENT_DISCONNECT,
+            .args = {
+                chan->peer_dom,
+                chan->port,
+            },
+        };
+        if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+            goto out;
+        if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL) < 0)
+            goto out;
     }
 
     ret = true;
@@ -739,4 +753,34 @@ size_t libkvmchan_buffer_space(struct libkvmchan *chan) {
     assert(RB_SUCCESS == ringbuf_sec_free_space(priv, pub, &ret));
 
     return ret;
+}
+
+/**
+ * Get the connection state of a given vchan.
+ *
+ * Possible return values are:
+ *        -1            - Failed to communicate with kvmchand server
+ *   VCHAN_CONNECTED    - Both ends of the vchan are connected
+ *   VCHAN_DISCONNECTED - One of the ends has disconnected
+ *   VCHAN_WAITING      - The server is waiting for the client to connect
+ */
+int libkvmchan_get_state(struct libkvmchan *chan) {
+    uint64_t command = (chan->flags & KVMCHAN_FLAG_SERVER) ?
+                            KVMCHAND_CMD_GET_STATE_SERVER : KVMCHAND_CMD_GET_STATE_CLIENT;
+    // Send message to daemon to record disconnect
+    struct kvmchand_ret kret;
+    struct kvmchand_message msg = {
+        .command = command,
+        .args = {
+            chan->peer_dom,
+            chan->port,
+        },
+    };
+
+    if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+        return -1;
+    if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL) < 0)
+        return -1;
+
+    return kret.ret;
 }

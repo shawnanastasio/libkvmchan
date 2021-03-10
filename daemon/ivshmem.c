@@ -341,7 +341,7 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
 
     // Handle command and send response
     struct kvmchand_ret ret = { .error = true, .ret = KVMCHAND_ERR_FAILURE };
-    switch(msg.command) {
+    switch (msg.command) {
         case KVMCHAND_CMD_HELLO:
             ret.ret = KVMCHAND_API_VERSION;
             ret.error = false;
@@ -428,6 +428,60 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
 
             break;
         }
+
+        case KVMCHAND_CMD_CLIENT_DISCONNECT:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_CLIENT_DISCONNECT,
+                    .args = {
+                        msg.args[0],
+                        dom,
+                        msg.args[1]
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_GET_STATE_CLIENT:
+        case KVMCHAND_CMD_GET_STATE_SERVER:
+        {
+            uint32_t dom = client_get_domain(client);
+            bool is_server = msg.command == KVMCHAND_CMD_GET_STATE_SERVER;
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_GET_STATE,
+                    .args = {
+                        is_server ? dom : msg.args[0],
+                        is_server ? msg.args[0] : dom,
+                        msg.args[1]
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+            ret.ret = ipc_resp.resp.ret;
+
+            break;
+        }
+
 
         default:
             /* unimplemented */

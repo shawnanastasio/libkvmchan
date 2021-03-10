@@ -35,6 +35,7 @@
 #include "ipc.h"
 #include "connections.h"
 #include "libkvmchan-priv.h"
+#include "libkvmchan.h"
 
 static struct vec_voidp connections;
 
@@ -70,7 +71,7 @@ static struct connection *connections_get_free(uint32_t server_dom, uint32_t cli
                                                uint64_t write_min) {
     for (size_t i=0; i<connections.count; i++) {
         struct connection *cur = connections.data[i];
-        if (cur->free &&
+        if (cur->state == CONNECTION_STATE_FREE &&
                 (cur->server.dom == server_dom || cur->server.dom == client_dom) &&
                 (cur->client.dom == client_dom || cur->client.dom == server_dom) &&
                 cur->write_min >= write_min && cur->read_min >= read_min) {
@@ -163,7 +164,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
     // Make sure that there isn't already an active connection on this server/port
     struct connection *existing = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (existing && !existing->free) {
+    if (existing && existing->state != CONNECTION_STATE_FREE) {
         log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
     }
@@ -174,7 +175,9 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
         // Re-use this connection
         log(LOGL_INFO, "Reusing existing vchan connection (previous port: %u)", existing->port);
         existing->port = port;
-        existing->free = false;
+        existing->server_connected = true;
+        existing->client_connected = false;
+        existing->state = CONNECTION_STATE_WAITING;
 
         // Sometimes we may be re-using a connection with swapped server/client domains, so
         // swap them again to match this connection.
@@ -295,10 +298,12 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     struct connection conn = {
         .server = { .dom = server_dom, .pid = server_pid, .ivposition = server_ivposition },
         .client = { .dom = client_dom, .pid = client_pid, .ivposition = client_ivposition },
+        .port = port,
         .read_min = read_min,
         .write_min = write_min,
-        .free = false,
-        .port = port,
+        .server_connected = true,
+        .client_connected = false,
+        .state = CONNECTION_STATE_WAITING,
         .memfd = memfd,
         .eventfds = {eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
     };
@@ -345,7 +350,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
 
     // Find corresponding vchan
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
-    if (!conn || conn->free) {
+    if (!conn || conn->state == CONNECTION_STATE_FREE) {
         log(LOGL_INFO, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
         return CONNECTIONS_ERROR_BAD_PORT;
@@ -362,6 +367,9 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
         *pid_out = conn->client.pid;
     }
 
+    conn->client_connected = true;
+    conn->state = CONNECTION_STATE_CONNECTED;
+
     return CONNECTIONS_ERROR_NONE;
 }
 
@@ -374,6 +382,8 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
  * @return           success?
  */
 bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+    log(LOGL_INFO, "Recorded vchan close at server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
+        server_dom, client_dom, port);
     size_t conn_i;
     struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, &conn_i);
     if (!conn) {
@@ -381,12 +391,22 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
             server_dom, port);
         return false;
     }
-    ASSERT(!conn->free);
+    if (conn->state == CONNECTION_STATE_FREE) {
+        log(LOGL_WARN, "BUG? Tried to close already-closed vchan at dom %"PRIu32" port %"PRIu32,
+            server_dom, port);
+        return false;
+    }
 
-    // Mark the connection as free so that it can be reused.
+    conn->server_connected = false;
+    conn->state = CONNECTION_STATE_DISCONNECTED;
+
+    // If both ends are disconnected, mark the connection as free so that it can be reused.
     // This means that vchans are only truly destroyed when a guest involved shuts down
     // which is fine for now, but may need to be changed eventually.
-    conn->free = true;
+    if (!conn->client_connected) {
+        log(LOGL_INFO, "vchan_close: vchan now marked as free\n");
+        conn->state = CONNECTION_STATE_FREE;
+    }
 
     return true;
 }
@@ -410,4 +430,57 @@ bool vchan_unregister_domain(pid_t pid) {
 
     log(LOGL_INFO, "No active connections found for pid %d", pid);
     return false;
+}
+
+/**
+ * Record that a client has disconnected from a given vchan
+ */
+enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+    log(LOGL_INFO, "Recorded vchan client disconnect at server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
+        server_dom, client_dom, port);
+    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    if (!conn || conn->state == CONNECTION_STATE_FREE)
+        return CONNECTIONS_ERROR_NOT_FOUND;
+
+    if (!conn->client_connected) {
+        log(LOGL_WARN, "Client tried to disconnect from a vchan they weren't connected to at"
+                       " server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
+            server_dom, client_dom, port);
+        return CONNECTIONS_ERROR_INVALID_OP;
+    }
+
+    conn->client_connected = false;
+    conn->state = CONNECTION_STATE_DISCONNECTED;
+
+    // If both ends are disconnected, mark the connection as free so that it can be reused.
+    // This means that vchans are only truly destroyed when a guest involved shuts down
+    // which is fine for now, but may need to be changed eventually.
+    if (!conn->server_connected) {
+        log(LOGL_INFO, "vchan_client_disconnect: vchan now marked as free\n");
+        conn->state = CONNECTION_STATE_FREE;
+    }
+
+    return CONNECTIONS_ERROR_NONE;
+}
+
+/**
+ * Get the state of a given vchan.
+ */
+int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    if (!conn || conn->state == CONNECTION_STATE_FREE)
+        return VCHAN_DISCONNECTED;
+
+    switch (conn->state) {
+        case CONNECTION_STATE_WAITING:
+            return VCHAN_WAITING;
+        case CONNECTION_STATE_CONNECTED:
+            return VCHAN_CONNECTED;
+        case CONNECTION_STATE_DISCONNECTED:
+            return VCHAN_DISCONNECTED;
+    }
+
+    log(LOGL_WARN, "BUG? Unknown state for vchan at server dom %"PRIu32", client_dom %"PRIu32", port %"PRIu32,
+        server_dom, client_dom, port);
+    return VCHAN_DISCONNECTED;
 }

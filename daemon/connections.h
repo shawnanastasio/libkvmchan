@@ -31,6 +31,8 @@ enum connections_error {
     CONNECTIONS_ERROR_NONE,
     CONNECTIONS_ERROR_DOM_OFFLINE,
     CONNECTIONS_ERROR_BAD_PORT,
+    CONNECTIONS_ERROR_NOT_FOUND,
+    CONNECTIONS_ERROR_INVALID_OP,
 };
 
 struct peer {
@@ -45,7 +47,14 @@ struct connection {
     uint32_t port;
     uint64_t read_min;
     uint64_t write_min;
-    bool free;
+    bool server_connected;
+    bool client_connected;
+
+    int state;
+#define CONNECTION_STATE_FREE         0
+#define CONNECTION_STATE_WAITING      1
+#define CONNECTION_STATE_CONNECTED    2
+#define CONNECTION_STATE_DISCONNECTED 3
 
     // memfd backing shared memory region
     int memfd;
@@ -62,5 +71,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
                 uint32_t *ivpos_out, pid_t *pid_out);
 bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 bool vchan_unregister_domain(pid_t pid);
+enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t client_dom, uint32_t port);
+int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 
 #endif //KVMCHAND_CONNECTIONS_H

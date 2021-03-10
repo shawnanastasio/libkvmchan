@@ -48,14 +48,22 @@
 // Whenever one of our clients creates a vchan in server mode,
 // we need to record it so that we can clean it up when the client
 // disconnects.
-struct server {
+struct server_vchan_conn {
     uint32_t client_dom;
+    uint32_t port;
+};
+
+// Likewise, but for connections to vchans in client mode
+struct client_vchan_conn {
+    uint32_t server_dom;
     uint32_t port;
 };
 
 struct client {
     int fd;
-    struct vec_voidp servers;
+
+    struct vec_voidp server_vchans; // Active vchans where this client is the server
+    struct vec_voidp client_vchans; // Active vchans where this client is the client
 
     // This flag allows the destructor to re-use the message handling
     // code paths to close any remaining servers without them trying to
@@ -83,10 +91,10 @@ static void client_destructor(void *client_) {
     close(client->fd);
     client->closed = true;
 
-    // Cleanup all created servers
-    size_t i = client->servers.count;
+    // Close all created servers
+    size_t i = client->server_vchans.count;
     while (i-- > 0) {
-        struct server *cur = client->servers.data[i];
+        struct server_vchan_conn *cur = client->server_vchans.data[i];
 
         struct kvmchand_message msg = {
             .command = KVMCHAND_CMD_CLOSE,
@@ -96,11 +104,28 @@ static void client_destructor(void *client_) {
             }
         };
         if (!handle_client_message(client, &msg))
-            log(LOGL_ERROR, "Failed to send cleanup message: %m. Potential resource leak");
+            log(LOGL_ERROR, "Failed to send server cleanup message: %m. Potential resource leak");
     }
-
     // Delete server vec
-    vec_voidp_destroy(&client->servers);
+    vec_voidp_destroy(&client->server_vchans);
+
+    // Disconnect from all client vchans
+    i = client->client_vchans.count;
+    while (i-- > 0) {
+        struct client_vchan_conn *cur = client->client_vchans.data[i];
+
+        struct kvmchand_message msg = {
+            .command = KVMCHAND_CMD_CLIENT_DISCONNECT,
+            .args = {
+                cur->server_dom,
+                cur->port
+            }
+        };
+        if (!handle_client_message(client, &msg))
+            log(LOGL_ERROR, "Failed to send client cleanup message: %m. Potential resource leak");
+    }
+    // Delete client vec
+    vec_voidp_destroy(&client->client_vchans);
 
     free(client);
 }
@@ -120,26 +145,49 @@ static struct client *get_client_by_fd(struct localhandler_data *data, int fd) {
  * automatically cleaned up when client disconnects
  */
 static void record_serverinit(struct client *client, struct kvmchand_message *msg) {
-    struct server *server = malloc_w(sizeof(struct server));
+    struct server_vchan_conn *server = malloc_w(sizeof(struct server_vchan_conn));
     server->client_dom = msg->args[0];
     server->port = msg->args[1];
-    ASSERT(vec_voidp_push_back(&client->servers, server));
+    ASSERT(vec_voidp_push_back(&client->server_vchans, server));
+}
+
+static void record_clientinit(struct client *client, struct kvmchand_message *msg) {
+    struct client_vchan_conn *client_conn = malloc_w(sizeof(struct client_vchan_conn));
+    client_conn->server_dom = msg->args[0];
+    client_conn->port = msg->args[1];
+    ASSERT(vec_voidp_push_back(&client->client_vchans, client_conn));
 }
 
 static void record_close(struct client *client, struct kvmchand_message *msg) {
     uint32_t client_dom = msg->args[0];
     uint32_t port = msg->args[1];
 
-    // Walk the server list and see if one of them is about to be closed
-    for (size_t i=0; i<client->servers.count; i++) {
-        struct server *cur = client->servers.data[i];
+    // Walk the server vchan list and see if one of them is about to be closed
+    for (size_t i=0; i<client->server_vchans.count; i++) {
+        struct server_vchan_conn *cur = client->server_vchans.data[i];
         if (cur->client_dom == client_dom && cur->port == port) {
-            vec_voidp_remove(&client->servers, i);
+            vec_voidp_remove(&client->server_vchans, i);
             return;
         }
     }
     log(LOGL_INFO, "Recorded close for non-existent connection? cfd: %d, cdom: %u, port: %u",
         client->fd, client_dom, port);
+}
+
+static void record_client_disconnect(struct client *client, struct kvmchand_message *msg) {
+    uint32_t server_dom = msg->args[0];
+    uint32_t port = msg->args[1];
+
+    // Walk the client vchan list and see if one of them is about to be disconnected from
+    for (size_t i=0; i<client->client_vchans.count; i++) {
+        struct client_vchan_conn *cur = client->client_vchans.data[i];
+        if (cur->server_dom == server_dom && cur->port == port) {
+            vec_voidp_remove(&client->client_vchans, i);
+            return;
+        }
+    }
+    log(LOGL_INFO, "Recorded client disconnect for non-existent connection? cfd: %d, sdom: %u, port: %u",
+        client->fd, server_dom, port);
 }
 
 
@@ -264,8 +312,12 @@ static bool defer_client_message(struct client *client, struct kvmchand_message 
     // Hooks for recording server open/close
     if (!ret->error && msg->command == KVMCHAND_CMD_SERVERINIT)
         record_serverinit(client, msg);
-    if (!ret->error && msg->command == KVMCHAND_CMD_CLOSE)
+    else if (!ret->error && msg->command == KVMCHAND_CMD_CLIENTINIT)
+        record_clientinit(client, msg);
+    else if (!ret->error && msg->command == KVMCHAND_CMD_CLOSE)
         record_close(client, msg);
+    else if (!ret->error && msg->command == KVMCHAND_CMD_CLIENT_DISCONNECT)
+        record_client_disconnect(client, msg);
     return true;
 }
 
@@ -280,15 +332,9 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
 
     /**
      * If we're not in dom 0, the only way we can meaningfully service
-     * requests is to defer them to the kvmchand server on dom0.
+     * most requests is to defer them to the kvmchand server on dom0.
      */
-    /*
-    if (!g_is_dom0) {
-        defer_client_message(msg, &ret);
-        goto out;
-    } */
-
-    switch(msg->command) {
+    switch (msg->command) {
         case KVMCHAND_CMD_HELLO:
             ret.ret = KVMCHAND_API_VERSION;
             ret.error = false;
@@ -297,6 +343,9 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
         case KVMCHAND_CMD_SERVERINIT:
         case KVMCHAND_CMD_CLIENTINIT:
         case KVMCHAND_CMD_CLOSE:
+        case KVMCHAND_CMD_CLIENT_DISCONNECT:
+        case KVMCHAND_CMD_GET_STATE_CLIENT:
+        case KVMCHAND_CMD_GET_STATE_SERVER:
             // Defer the command to dom0 so that the operation can be performed.
             // Since it takes some time for the ivshmem device to show up,
             // don't immediately obtain the file descriptors. The user can
@@ -357,14 +406,14 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
 
 static bool handle_client_message_dom0(struct client *client, struct kvmchand_message *msg) {
     int fd = client->fd;
-    struct kvmchand_ret ret = { .error = true, .ret = KVMCHAND_ERR_FAILURE };
+    struct kvmchand_ret ret = { .error = true, .ret = KVMCHAND_ERR_FAILURE, .fd_count = 0 };
     int fds[KVMCHAND_FD_MAX];
 
     // Initialize fds to -1 to avoid clang scan-build warning
     for (size_t i=0; i<KVMCHAND_FD_MAX; i++)
         fds[i] = -1;
 
-    switch(msg->command) {
+    switch (msg->command) {
         case KVMCHAND_CMD_HELLO:
             ret.ret = KVMCHAND_API_VERSION;
             ret.error = false;
@@ -443,7 +492,7 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             if (ipc_resp.resp.error) {
                 switch (ipc_resp.resp.ret) {
                     case CONNECTIONS_ERROR_DOM_OFFLINE:
-                        ret.ret = KVMCHAND_CMD_HELLO;
+                        ret.ret = KVMCHAND_ERR_DOMOFFLINE;
                 }
                 goto out;
             }
@@ -467,6 +516,9 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             ret.error = ipc_resp.resp.error;
             ret.ret = ipc_resp.resp.ret;
 
+            if (!ret.error)
+                record_clientinit(client, msg);
+
             break;
         }
 
@@ -489,10 +541,63 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             if (!ipc_send_message(&ipc_msg, &ipc_resp))
                 goto out;
 
-            ret.fd_count = 0;
             ret.error = ipc_resp.resp.error;
             if (!ret.error)
                 record_close(client, msg);
+
+            break;
+        }
+
+        case KVMCHAND_CMD_CLIENT_DISCONNECT:
+        {
+            // Forward message to MAIN over IPC
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_CLIENT_DISCONNECT,
+                    .args = {
+                        msg->args[0],
+                        0,
+                        msg->args[1],
+                    }
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                goto out;
+
+            ret.error = ipc_resp.resp.error;
+            if (!ret.error)
+                record_client_disconnect(client, msg);
+
+            break;
+        }
+
+        case KVMCHAND_CMD_GET_STATE_CLIENT:
+        case KVMCHAND_CMD_GET_STATE_SERVER:
+        {
+            bool is_server = msg->command == KVMCHAND_CMD_GET_STATE_SERVER;
+
+            // Forward message to MAIN over IPC
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_VCHAN_GET_STATE,
+                    .args = {
+                        is_server ? 0 : msg->args[0],
+                        is_server ? msg->args[0] : 0,
+                        msg->args[1],
+                    }
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                goto out;
+
+            ret.error = ipc_resp.resp.error;
+            ret.ret = ipc_resp.resp.ret;
 
             break;
         }
@@ -643,7 +748,8 @@ void run_localhandler_loop(int mainsoc, bool is_dom0) {
                 struct client *client_new = malloc_w(sizeof(struct client));
                 client_new->fd = fd;
                 client_new->closed = false;
-                ASSERT(vec_voidp_init(&client_new->servers, 10, free_destructor));
+                ASSERT(vec_voidp_init(&client_new->server_vchans, 10, free_destructor));
+                ASSERT(vec_voidp_init(&client_new->client_vchans, 10, free_destructor));
                 if (!vec_voidp_push_back(&data.clients, client_new)) {
                     log(LOGL_ERROR, "Failed to add fd to vec: %m.");
                     goto error;

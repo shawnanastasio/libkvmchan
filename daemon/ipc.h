@@ -124,6 +124,27 @@ struct ipc_message {
  */
 #define MAIN_IPC_CMD_UNREGISTER_DOM 3
 
+/**
+ * Record client disconnect on a vchan.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of client
+ * args[3] - (u32) port
+ *
+ * resp.error - error?
+ * resp.ret - On failure, `enum connections_error` code.
+ */
+#define MAIN_IPC_CMD_VCHAN_CLIENT_DISCONNECT 4
+
+/**
+ * Get the state of a vchan.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of client
+ * args[2] - (u32) port
+ *
+ * resp.ret - (int) VCHAN_{DISCONNECTED,CONNECTED,WAITING}
+ */
+#define MAIN_IPC_CMD_VCHAN_GET_STATE 5
+
 
 // libvirt process commands
 
