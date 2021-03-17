@@ -40,6 +40,10 @@
 #include "libkvmchan-priv.h"
 #include "ringbuf.h"
 
+// Delay between calls to
+#define DEFERRED_FD_DELAY_US (500 * 1000)
+
+// Delay between client init attempts
 #define CLIENT_INIT_RETRY_US (1 * 1000 * 1000)
 
 // Delay values for avoiding a vchan initialization race in client_init.
@@ -288,7 +292,7 @@ static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_M
             return true;
         }
 
-        usleep(4 * 1000 * 1000);
+        usleep(DEFERRED_FD_DELAY_US);
     }
 
     errno = ENOENT;
