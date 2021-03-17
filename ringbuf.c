@@ -51,7 +51,8 @@ static void block_on_eventfd(int eventfd) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(eventfd, &rfds);
-    ignore_value(select(eventfd + 1, &rfds, NULL, NULL, NULL));
+    struct timeval timeout = { .tv_sec = 1 };
+    ignore_value(select(eventfd + 1, &rfds, NULL, NULL, &timeout));
 }
 
 static void clear_eventfd(int fd) {
