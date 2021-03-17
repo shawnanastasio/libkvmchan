@@ -44,7 +44,7 @@
 
 // Delay values for avoiding a vchan initialization race in client_init.
 // See the comment in libkvmchan_client_init_impl for more information.
-#define CLIENT_INIT_MAX_MAGIC_RETRIES 10
+#define CLIENT_INIT_MAX_MAGIC_RETRIES 20
 #define CLIENT_INIT_MAGIC_DELAY_US (1 * 1000 * 1000)
 
 // Represents global library state.
@@ -489,7 +489,6 @@ static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t 
         // If the magic is still bad we have no choice but to bail out
         if (*magic_ptr != SHMEM_MAGIC) {
             errno = EBADE;
-            //errno = EAGAIN;
             goto out_fail_fds;
         }
     }
