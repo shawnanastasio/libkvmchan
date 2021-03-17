@@ -42,6 +42,11 @@
 
 #define CLIENT_INIT_RETRY_US (1 * 1000 * 1000)
 
+// Delay values for avoiding a vchan initialization race in client_init.
+// See the comment in libkvmchan_client_init_impl for more information.
+#define CLIENT_INIT_MAX_MAGIC_RETRIES 10
+#define CLIENT_INIT_MAGIC_DELAY_US (1 * 1000 * 1000)
+
 // Represents global library state.
 struct libkvmchan_state {
     // Socket connection to kvmchand
@@ -464,8 +469,29 @@ static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t 
 
     // Verify magic
     if (shm_hdr->magic != SHMEM_MAGIC) {
-        errno = EBADE;
-        goto out_fail_fds;
+        volatile uint64_t *magic_ptr = (volatile uint64_t *)&shm_hdr->magic;
+        // There is a race between the time where the server requests a new vchan
+        // be created and when it actually maps it and sets the magic value.
+        //
+        // To allow clients to rely on a blocking client_init, we have to try to wait out
+        // the race instead of immediately returning a failure.
+        //
+        // This is all a bit precarious but the vchan API gives us no choice - we are
+        // required to successfully block on a vchan that hasn't been opened yet. An
+        // alternative implementation could involve the vchan server signaling to kvmchand that it
+        // has finished initializing. This way kvmchand could reject our CLIENTINIT command until
+        // the vchan is fully ready. TODO I guess.
+        for (size_t retries = 0; *magic_ptr != SHMEM_MAGIC &&
+                retries < CLIENT_INIT_MAX_MAGIC_RETRIES; retries++) {
+            usleep(CLIENT_INIT_MAGIC_DELAY_US);
+        }
+
+        // If the magic is still bad we have no choice but to bail out
+        if (*magic_ptr != SHMEM_MAGIC) {
+            errno = EBADE;
+            //errno = EAGAIN;
+            goto out_fail_fds;
+        }
     }
 
     if (RB_SUCCESS != ringbuf_sec_infer_priv(&ret->host_to_client_rb, &shm_hdr->host_to_client_pub,
