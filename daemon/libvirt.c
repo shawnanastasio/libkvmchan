@@ -181,21 +181,6 @@ out:
     return ret;
 }
 
-static void print_running_domains(virConnectPtr conn) {
-    puts("---Running Domains---");
-    puts("Name               ID");
-
-    sem_wait(&running_domains_sem);
-    for (size_t i=0; i<running_domains.count; i++) {
-        struct domain_info *cur = running_domains.data[i];
-        virDomainPtr dom = virDomainLookupByUUIDString(conn, cur->uuid_str);
-        printf("%-18s %d\n", virDomainGetName(dom), virDomainGetID(dom));
-    }
-    sem_post(&running_domains_sem);
-
-    puts("---------------------");
-}
-
 /**
  * Since the libvirt developers have decided not to share
  * the QEMU process' pid with us lowly API consumers,

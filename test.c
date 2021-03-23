@@ -373,10 +373,10 @@ START_TEST(ringbuf_sec_init_infer_test) {
     ck_assert(ringbuf_sec_infer_priv(&rb_i, &pub, rb_buf, 10 + 1, 0, RINGBUF_DIRECTION_LOCAL, -1, -1) == RB_SUCCESS);
 
     ck_assert_msg(rb.flags == rb_i.flags, "rb.flags: 0x%x, rb_i.flags: 0x%x", rb.flags, rb_i.flags);
-    ck_assert_msg(rb.size == rb_i.size, "rb.size: 0x%x, rb_i.size: 0x%x", rb.size, rb_i.size);
-    ck_assert_msg(rb.start == rb_i.start, "rb.start: 0x%x, rb_i.start: 0x%x", rb.start, rb_i.start);
-    ck_assert_msg(rb.pos_start == rb_i.pos_start, "rb.pos_start: 0x%x, rb_i.pos_start: 0x%x", rb.pos_start, rb_i.pos_start);
-    ck_assert_msg(rb.pos_end == rb_i.pos_end, "rb.pos_end: 0x%x, rb_i.pos_end: 0x%x", rb.pos_end, rb_i.pos_end);
+    ck_assert_msg(rb.size == rb_i.size, "rb.size: 0x%zx, rb_i.size: 0x%zx", rb.size, rb_i.size);
+    ck_assert_msg(rb.start == rb_i.start, "rb.start: %p, rb_i.start: %p", rb.start, rb_i.start);
+    ck_assert_msg(rb.pos_start == rb_i.pos_start, "rb.pos_start: 0x%zx, rb_i.pos_start: 0x%zx", rb.pos_start, rb_i.pos_start);
+    ck_assert_msg(rb.pos_end == rb_i.pos_end, "rb.pos_end: 0x%zx, rb_i.pos_end: 0x%zx", rb.pos_end, rb_i.pos_end);
 }
 END_TEST
 
@@ -453,7 +453,7 @@ START_TEST(ringbuf_sec_blocking_read_test) {
 
     // Join the thread
     pthread_join(thread, &ret);
-    ck_assert_msg(!ret, "Thread failed: %s", ret);
+    ck_assert_msg(!ret, "Thread failed: %s", (char *)ret);
 
     ck_assert(memcmp(test_pattern_10, tmp, 10) == 0);
 }

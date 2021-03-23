@@ -183,20 +183,6 @@ static int req_epollfd;
 
 static void vfio_conn_free_eventfds(struct vfio_connection *conn);
 
-static void print_ivshmem_devices(struct vec_voidp *devices) {
-    size_t i=0;
-
-    printf("{");
-    goto skip_comma;
-
-    for (; i<devices->count; i++) {
-        printf(", ");
-skip_comma:
-        printf("%s", (char *)devices->data[i]);
-    }
-    printf("}\n");
-}
-
 void cleanup_vfio_groups(void) {
     size_t i = g_vfio_data->groups.count;
     while (i-- > 0) {
