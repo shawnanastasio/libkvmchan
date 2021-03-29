@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -39,75 +39,226 @@
 #include "libkvmchan-priv.h"
 #include "libkvmchan.h"
 
-static struct vec_voidp connections;
+struct connection {
+    uint32_t server_dom;
+    uint32_t server_ivposition; // IVPosition if guest, or 0
+    uint32_t client_dom;
+    uint32_t client_ivposition; // IVPosition if guest, or 0
+    bool server_connected;
+    bool client_connected;
 
-static void connection_destructor(void *conn_) {
-    struct connection *conn = conn_;
-    close(conn->memfd);
-    for (size_t i=0; i<ARRAY_SIZE(conn->eventfds); i++)
-        close(conn->eventfds[i]);
+    int state;
+#define CONNECTION_STATE_FREE         0
+#define CONNECTION_STATE_WAITING      1
+#define CONNECTION_STATE_CONNECTED    2
+#define CONNECTION_STATE_DISCONNECTED 3
+#define CONNECTION_STATE_UNUSABLE     4
+
+    int type;
+#define CONNECTION_TYPE_MOVED 0
+#define CONNECTION_TYPE_VCHAN 1
+#define CONNECTION_TYPE_SHMEM 2
+
+    // Type-specific fields
+    union {
+        struct {
+            int memfd; // memfd backing shared memory region
+            uint32_t port;
+            uint64_t read_min;
+            uint64_t write_min;
+            int eventfds[4]; // Notification eventfds
+        } vchan;
+
+        struct {
+            uint32_t region_id;
+        } shmem;
+    };
+};
+static void connection_destructor(struct connection *conn);
+DECLARE_LLIST_FOR_TYPE(connection, struct connection, connection_destructor)
+
+struct domain {
+    uint32_t dom;        // Domain ID
+    pid_t pid;           // PID of QEMU if remote, or -1
+    uint32_t page_size;  // Peer's page size if known, or 0
+
+    // Connections in which this domain is the server
+    struct llist_connection hosted_connections;
+};
+static void domain_destructor(struct domain *domain);
+DECLARE_LLIST_FOR_TYPE(domain, struct domain, domain_destructor)
+
+//
+// Database of domains and their vchan/shmem connections
+//
+struct connections_db {
+    struct llist_domain domains;
+};
+static struct connections_db connections;
+
+static void connection_destructor(struct connection *conn) {
+    switch (conn->type) {
+        case CONNECTION_TYPE_MOVED:
+            break;
+
+        case CONNECTION_TYPE_VCHAN:
+            close(conn->vchan.memfd);
+            for (size_t i=0; i<ARRAY_SIZE(conn->vchan.eventfds); i++)
+                close(conn->vchan.eventfds[i]);
+            break;
+
+        case CONNECTION_TYPE_SHMEM:
+            break;
+
+        default:
+            log_BUG("Tried to destroy connection with unknown type %"PRIu32"!", conn->type);
+    }
 }
 
-bool connections_init(void) {
-    if (!vec_voidp_init(&connections, 10, connection_destructor))
-        return false;
-
-    return true;
+static void domain_destructor(struct domain *domain) {
+    llist_connection_destroy(&domain->hosted_connections);
 }
 
-static struct connection *connections_get_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port,
-                                          size_t *conn_i_out) {
-    for (size_t i=0; i<connections.count; i++) {
-        struct connection *cur = connections.data[i];
-        if (cur->server.dom == server_dom && cur->client.dom == client_dom && cur->port == port) {
-            if (conn_i_out)
-                *conn_i_out = i;
+void connections_init(void) {
+    llist_domain_init(&connections.domains);
+}
+
+static struct domain *connections_get_dom(uint32_t dom) {
+    llist_for_each(struct domain, cur, &connections.domains) {
+        if (cur->dom == dom)
+            return cur;
+    }
+    return NULL;
+}
+
+static struct domain *connections_get_dom_by_pid(pid_t pid) {
+    llist_for_each(struct domain, cur, &connections.domains) {
+        if (cur->pid == pid)
+            return cur;
+    }
+    return NULL;
+}
+
+static struct connection *connections_get_vchan_by_dom(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
+    struct domain *server = connections_get_dom(server_dom);
+    if (!server) {
+        return NULL;
+    }
+
+    // Iterate through all connections hosted by this domain
+    llist_for_each(struct connection, cur_conn, &server->hosted_connections) {
+        if (cur_conn->type == CONNECTION_TYPE_VCHAN && cur_conn->client_dom == client_dom &&
+                cur_conn->vchan.port == port) {
+            return cur_conn;
+        }
+    }
+    return NULL;
+}
+
+static struct connection *connections_get_free_vchan(uint32_t server_dom, uint32_t client_dom, uint64_t read_min,
+                                                     uint64_t write_min) {
+    // First try iterating through connections owned by the provided server dom
+    struct domain *server = connections_get_dom(server_dom);
+    if (!server) {
+        log(LOGL_INFO, "connections_get_free_vchan: no such server");
+        return NULL;
+    }
+
+    llist_for_each(struct connection, cur, &server->hosted_connections) {
+        if (cur->type == CONNECTION_TYPE_VCHAN && cur->state == CONNECTION_STATE_FREE &&
+                cur->client_dom == client_dom && cur->vchan.write_min >= write_min &&
+                cur->vchan.read_min >= read_min) {
+            // Found a free connection owned by the server that is big enough
+            log(LOGL_INFO, "connections_get_free_vchan: found from server!");
             return cur;
         }
     }
 
-    return NULL;
-}
+    // Next try iterating through connections owned by the provided client dom
+    struct domain *client = connections_get_dom(client_dom);
+    if (!client) {
+        log(LOGL_INFO, "connections_get_free_vchan: no such client");
+        return NULL;
+    }
 
-static struct connection *connections_get_free(uint32_t server_dom, uint32_t client_dom, uint64_t read_min,
-                                               uint64_t write_min) {
-    for (size_t i=0; i<connections.count; i++) {
-        struct connection *cur = connections.data[i];
-        if (cur->state == CONNECTION_STATE_FREE &&
-                (cur->server.dom == server_dom || cur->server.dom == client_dom) &&
-                (cur->client.dom == client_dom || cur->client.dom == server_dom) &&
-                cur->write_min >= write_min && cur->read_min >= read_min) {
-            // Found a free connection that is big enough to service this request
+    llist_for_each(struct connection, cur, &client->hosted_connections) {
+        if (cur->type == CONNECTION_TYPE_VCHAN && cur->state == CONNECTION_STATE_FREE &&
+                cur->client_dom == server_dom && cur->vchan.write_min >= write_min &&
+                cur->vchan.read_min >= read_min) {
+            // Found a free connection owned by the client that is big enough
+            log(LOGL_INFO, "connections_get_free_vchan: found from client!");
             return cur;
         }
     }
 
+    log(LOGL_INFO, "connections_get_free_vchan: no eligible connections found");
     return NULL;
 }
 
-static void connections_swap_for_reuse(struct connection *conn, uint32_t server_dom, uint32_t client_dom) {
-    ASSERT(conn->server.dom == server_dom || conn->server.dom == client_dom);
-    ASSERT(conn->client.dom == client_dom || conn->client.dom == server_dom);
-    if (conn->server.dom == server_dom)
+static void connections_swap_for_reuse(struct connection **conn_ptr, uint32_t server_dom, uint32_t client_dom) {
+    struct connection *conn = *conn_ptr;
+    struct domain *client = connections_get_dom(client_dom);
+    struct domain *server = connections_get_dom(server_dom);
+    if (!client || !server) {
+        log(LOGL_ERROR, "BUG? Tried to re-use a connection between domains but at least one end is offline!"
+                "(server %"PRIu32", client %"PRIu32"). Leaking connection.", server_dom, client_dom);
+        conn->state = CONNECTION_STATE_UNUSABLE;
+        return;
+    }
+
+    ASSERT(conn->type == CONNECTION_TYPE_VCHAN);
+    ASSERT(conn->server_dom == server_dom || conn->server_dom == client_dom);
+    ASSERT(conn->client_dom == client_dom || conn->client_dom == server_dom);
+    if (conn->server_dom == server_dom)
         // No swapping necessary
         return;
 
-    // Swap server and client
-    struct peer tmp;
-    memcpy(&tmp, &conn->server, sizeof(struct peer));
-    memcpy(&conn->server, &conn->client, sizeof(struct peer));
-    memcpy(&conn->client, &tmp, sizeof(struct peer));
+    // We need to swap the connection's server/client and reparent it. The easiest way is to just create a copy,
+    // delete the the old one, and move the copy to the new server's list.
+    struct connection copy;
+    memcpy(&copy, conn, sizeof(struct connection));
+    copy.server_dom = server_dom;
+    copy.client_dom = client_dom;
+
+    uint32_t tmp = copy.server_ivposition;
+    copy.server_ivposition = copy.client_ivposition;
+    copy.client_ivposition = tmp;
+
+    // Set the old conn's type to MOVED so that the destructor won't release its resources and delete it
+    conn->type = CONNECTION_TYPE_MOVED;
+    llist_connection_remove(&client->hosted_connections, conn);
+
+    // Create new connection on server's list
+    struct connection *new_conn = llist_connection_new_at_front(&server->hosted_connections);
+    memcpy(new_conn, &copy, sizeof(struct connection));
+
+    // Update the caller's conn pointer to point to the re-parented copy
+    *conn_ptr = new_conn;
 }
 
-static bool connections_add(struct connection *conn) {
-    struct connection *conn_h = malloc_w(sizeof(struct connection));
-    memcpy(conn_h, conn, sizeof(struct connection));
-
-    if (!vec_voidp_push_back(&connections, conn_h)) {
-        free(conn_h);
-        return false;
+static bool connections_register(struct connection *conn, pid_t server_pid, pid_t client_pid) {
+    struct domain *server = connections_get_dom(conn->server_dom);
+    if (!server) {
+        log(LOGL_INFO, "Registering vchan server domain %"PRIu32, conn->server_dom);
+        server = llist_domain_new_at_front(&connections.domains);
+        server->dom = conn->server_dom;
+        server->pid = server_pid;
+        server->page_size = 0; // Unknown at this point
+        llist_connection_init(&server->hosted_connections);
     }
 
+    struct domain *client = connections_get_dom(conn->client_dom);
+    if (!client) {
+        log(LOGL_INFO, "Registering vchan client domain %"PRIu32, conn->client_dom);
+        client = llist_domain_new_at_front(&connections.domains);
+        client->dom = conn->client_dom;
+        client->pid = client_pid;
+        client->page_size = 0; // Unknown at this point
+        llist_connection_init(&client->hosted_connections);
+    }
+
+    struct connection *new_conn = llist_connection_new_at_front(&server->hosted_connections);
+    memcpy(new_conn, conn, sizeof(struct connection));
     return true;
 }
 
@@ -177,7 +328,7 @@ static bool conn_is_in_use(struct connection *conn) {
  * @param port                  Port number
  * @param read_min              Minimum size of client->server ring buffer
  * @param write_min             Minimum size of server->client ring buffer
- * @param[out] ivpos_out        Newly allocated ivposition for server, or client if server is remote
+ * @param[out] ivpos_out        Newly allocated ivposition for server, or client if server is dom0
  * @param[out] client_pid_out   qemu PID of client, if remote
  * @return                      IVPosition of server, or 0 on failure
  */
@@ -199,41 +350,45 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     }
 
     // Make sure that there isn't already an active connection on this server/port
-    struct connection *existing = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    struct connection *existing = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (existing && existing->state != CONNECTION_STATE_FREE) {
         log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
         goto fail;
     }
 
     // See if there is an existing connection that can be reused
-    existing = connections_get_free(server_dom, client_dom, read_min, write_min);
+    existing = connections_get_free_vchan(server_dom, client_dom, read_min, write_min);
     if (existing) {
         // Re-use this connection
-        log(LOGL_INFO, "Reusing existing vchan connection (previous port: %u)", existing->port);
+        log(LOGL_INFO, "Reusing existing vchan connection (previous port: %"PRIu32", new port: %"PRIu32")",
+                existing->vchan.port, port);
 
         // Clear the data
-        if (!clear_memfd_for_reuse(existing->memfd)) {
+        if (!clear_memfd_for_reuse(existing->vchan.memfd)) {
             // Failed to securely wipe the old connection's shared memory region,
             // mark the connection as unusable and fail
             log(LOGL_WARN, "Marking old connection (server dom %"PRIu32
                            ", client dom %"PRIu32", port %"PRIu32") as UNUSABLE!",
-                           existing->server.dom, existing->client.dom, existing->port);
+                           existing->server_dom, existing->client_dom, existing->vchan.port);
             existing->state = CONNECTION_STATE_UNUSABLE;
             return false;
         }
 
-        existing->port = port;
+        existing->vchan.port = port;
         existing->server_connected = true;
         existing->client_connected = false;
         existing->state = CONNECTION_STATE_WAITING;
 
         // Sometimes we may be re-using a connection with swapped server/client domains, so
         // swap them again to match this connection.
-        connections_swap_for_reuse(existing, server_dom, client_dom);
+        connections_swap_for_reuse(&existing, server_dom, client_dom);
 
-        *ivpos_out = (server_dom > 0) ? existing->server.ivposition : existing->client.ivposition;
-        if (client_dom > 0)
-            *client_pid_out = existing->client.pid;
+        *ivpos_out = (server_dom > 0) ? existing->server_ivposition : existing->client_ivposition;
+        if (client_dom > 0) {
+            struct domain *client = connections_get_dom(client_dom);
+            ASSERT(client);
+            *client_pid_out = client->pid;
+        }
 
         return true;
     }
@@ -344,18 +499,23 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
     // Record this connection
     struct connection conn = {
-        .server = { .dom = server_dom, .pid = server_pid, .ivposition = server_ivposition },
-        .client = { .dom = client_dom, .pid = client_pid, .ivposition = client_ivposition },
-        .port = port,
-        .read_min = read_min,
-        .write_min = write_min,
+        .server_dom = server_dom,
+        .server_ivposition = server_ivposition,
+        .client_dom = client_dom,
+        .client_ivposition = client_ivposition,
         .server_connected = true,
         .client_connected = false,
         .state = CONNECTION_STATE_WAITING,
-        .memfd = memfd,
-        .eventfds = {eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
+        .type = CONNECTION_TYPE_VCHAN,
+        .vchan = {
+            .memfd = memfd,
+            .port = port,
+            .read_min = read_min,
+            .write_min = write_min,
+            .eventfds = {eventfds[0], eventfds[1], eventfds[2], eventfds[3]}
+        }
     };
-    if (!connections_add(&conn)) {
+    if (!connections_register(&conn, server_pid, client_pid)) {
         log(LOGL_ERROR, "Failed to record new vchan: %m.");
         goto fail_register_conn;
     }
@@ -390,6 +550,8 @@ fail:
  */
 enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                                   uint32_t *ivpos_out, pid_t *pid_out) {
+    log(LOGL_INFO, "vchan_conn called! server_dom: %"PRIu32", client_dom: %"PRIu32", port %"PRIu32,
+            server_dom, client_dom, port);
     // Make sure server_dom is online if it's not dom0
     if (server_dom != 0 && get_domain_pid(server_dom) < 0) {
         log(LOGL_INFO, "Tried to connect to offline server domain %"PRIu32, server_dom);
@@ -397,7 +559,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
     }
 
     // Find corresponding vchan
-    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    struct connection *conn = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (!conn || !conn_is_in_use(conn)) {
         log(LOGL_INFO, "Tried to connect to non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
@@ -407,12 +569,16 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
     if (client_dom == 0) {
         // Called from dom 0, return the ivpos+pid of the server so that
         // the conn fds for this connection can be looked up by the caller
-        *ivpos_out = conn->server.ivposition;
-        *pid_out = conn->server.pid;
+        struct domain *server = connections_get_dom(conn->server_dom);
+        ASSERT(server);
+        *ivpos_out = conn->server_ivposition;
+        *pid_out = server->pid;
     } else {
         // Called from guest, return the guest's ivpos+pid which can be looked up directly
-        *ivpos_out = conn->client.ivposition;
-        *pid_out = conn->client.pid;
+        struct domain *client = connections_get_dom(conn->client_dom);
+        ASSERT(client);
+        *ivpos_out = conn->client_ivposition;
+        *pid_out = client->pid;
     }
 
     conn->client_connected = true;
@@ -432,8 +598,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
 bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     log(LOGL_INFO, "Recorded vchan close at server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
         server_dom, client_dom, port);
-    size_t conn_i;
-    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, &conn_i);
+    struct connection *conn = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (!conn) {
         log(LOGL_WARN, "Tried to close non-existent vchan at dom %"PRIu32" port %"PRIu32,
             server_dom, port);
@@ -463,21 +628,14 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
  * Remove a closed domain from all bookkeeping data. Close all corresponding vchans.
  */
 bool vchan_unregister_domain(pid_t pid) {
-    size_t i = connections.count;
-    while (i-- > 0) {
-        struct connection *cur = connections.data[i];
-
-        if (cur->server.pid == pid || cur->client.pid == pid) {
-            // Either the server or client shut down, destroy this connection.
-            vec_voidp_remove(&connections, i);
-            log(LOGL_INFO, "Removed vchan between dom %u (server) and dom %u, (client)",
-                    cur->server.dom, cur->client.dom);
-            return true;
-        }
+    struct domain *dom = connections_get_dom_by_pid(pid);
+    if (!dom) {
+        log(LOGL_INFO, "Ignoring request to unregister unknown domain pid %d", pid);
+        return false;
     }
 
-    log(LOGL_INFO, "No active connections found for pid %d", pid);
-    return false;
+    llist_domain_remove(&connections.domains, dom);
+    return true;
 }
 
 /**
@@ -486,7 +644,7 @@ bool vchan_unregister_domain(pid_t pid) {
 enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
     log(LOGL_INFO, "Recorded vchan client disconnect at server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
         server_dom, client_dom, port);
-    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    struct connection *conn = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (!conn || !conn_is_in_use(conn))
         return CONNECTIONS_ERROR_NOT_FOUND;
 
@@ -515,7 +673,7 @@ enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t cli
  * Get the state of a given vchan.
  */
 int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
-    struct connection *conn = connections_get_by_dom(server_dom, client_dom, port, NULL);
+    struct connection *conn = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (!conn || !conn_is_in_use(conn))
         return VCHAN_DISCONNECTED;
 

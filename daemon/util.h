@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -77,6 +77,50 @@ bool vec_ ## Tname ## _contains(struct vec_ ## Tname *v, T element, Tname ## _co
 vec_template_proto(voidp, void*)
 vec_template_proto(int, int)
 vec_template_proto(u32, uint32_t)
+#undef vec_template_proto
+
+struct llist_generic {
+    void *first;
+    void *last;
+    size_t element_size;
+    void (*destructor)(void *);
+};
+struct llist_footer {
+    struct llist_generic *parent_list;
+    void *next;
+    void *prev;
+};
+void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *));
+void *llist_generic_new_at_front(struct llist_generic *l);
+void *llist_generic_new_at_back(struct llist_generic *l);
+void llist_generic_remove(struct llist_generic *l, void *entry);
+void llist_generic_destroy(struct llist_generic *l);
+struct llist_footer *llist_generic_get_footer(struct llist_generic *l, void *ptr);
+
+#define DECLARE_LLIST_FOR_TYPE(Tname, T, destructor_func) \
+struct llist_ ## Tname { struct llist_generic l; }; \
+void llist_ ## Tname ## _init(struct llist_ ## Tname *l) { \
+    void (*destructor)(T *) = destructor_func; \
+    llist_generic_init((struct llist_generic *)l, sizeof(T), (void (*)(void *))destructor); \
+} \
+T *llist_ ## Tname ## _new_at_front(struct llist_ ## Tname *l) { \
+    return (T *)llist_generic_new_at_front((struct llist_generic *)l); \
+} \
+T *llist_ ## Tname ## _new_at_back(struct llist_ ## Tname *l) { \
+    return (T *)llist_generic_new_at_back((struct llist_generic *)l); \
+} \
+void llist_ ## Tname ## _remove(struct llist_ ## Tname *l, T *elem) { \
+    llist_generic_remove((struct llist_generic *)l, elem); \
+} \
+void llist_ ## Tname ## _destroy(struct llist_ ## Tname *l) { \
+    llist_generic_destroy((struct llist_generic *)l); \
+}
+
+#define llist_for_each(T, cur, list) \
+    for (T *next, *cur = (list)->l.first; \
+            (next = cur ? llist_generic_get_footer(&(list)->l, cur)->next : NULL, cur); \
+            cur = next)
+
 
 void free_destructor(void *element);
 bool str_is_number(const char *str);

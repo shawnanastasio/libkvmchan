@@ -360,8 +360,7 @@ static void host_main(void) {
         goto fail_errno;
 
     // Initialize connections database
-    if (!connections_init())
-        goto fail_errno;
+    connections_init();
 
     // listen for messages
     int sockets[NUM_IPC_SOCKETS];

@@ -35,36 +35,7 @@ enum connections_error {
     CONNECTIONS_ERROR_INVALID_OP,
 };
 
-struct peer {
-    uint32_t dom;        // Domain ID
-    pid_t pid;           // PID of QEMU if remote, or -1
-    uint32_t ivposition; // IVPosition if remote, or 0
-};
-
-struct connection {
-    struct peer server;
-    struct peer client;
-    uint32_t port;
-    uint64_t read_min;
-    uint64_t write_min;
-    bool server_connected;
-    bool client_connected;
-
-    int state;
-#define CONNECTION_STATE_FREE         0
-#define CONNECTION_STATE_WAITING      1
-#define CONNECTION_STATE_CONNECTED    2
-#define CONNECTION_STATE_DISCONNECTED 3
-#define CONNECTION_STATE_UNUSABLE     4
-
-    // memfd backing shared memory region
-    int memfd;
-
-    // Notification eventfds
-    int eventfds[4];
-};
-
-bool connections_init(void);
+void connections_init(void);
 bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 uint64_t read_min, uint64_t write_min, uint32_t *ivpos_out,
                 pid_t *client_pid_out);

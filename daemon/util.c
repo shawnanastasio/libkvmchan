@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -105,6 +105,76 @@ bool vec_ ## Tname ## _contains(struct vec_ ## Tname *v, T element, Tname ## _co
 vec_template(voidp, void*)
 vec_template(int, int)
 vec_template(u32, uint32_t)
+
+struct llist_footer *llist_generic_get_footer(struct llist_generic *l, void *ptr) {
+    return (struct llist_footer *)((char *)ptr + l->element_size);
+}
+
+void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *)) {
+    l->first = NULL;
+    l->last = NULL;
+    l->element_size = element_size;
+    l->destructor = destructor;
+}
+
+void *llist_generic_new_at_front(struct llist_generic *l) {
+    void *new_block = malloc_w(l->element_size + sizeof(struct llist_footer));
+    struct llist_footer *footer = llist_generic_get_footer(l, new_block);
+    footer->prev = NULL;
+    footer->next = l->first;
+    footer->parent_list = l;
+    l->first = new_block;
+    return new_block;
+}
+
+void *llist_generic_new_at_back(struct llist_generic *l) {
+    void *new_block = malloc_w(l->element_size + sizeof(struct llist_footer));
+    struct llist_footer *footer = llist_generic_get_footer(l, new_block);
+    footer->prev = l->last;
+    footer->next = NULL;
+    footer->parent_list = l;
+    l->last = new_block;
+    return new_block;
+}
+
+void llist_generic_remove(struct llist_generic *l, void *entry) {
+    struct llist_footer *footer = llist_generic_get_footer(l, entry);
+    ASSERT(footer->parent_list == l);
+
+    // Call user-provided destructor
+    l->destructor(entry);
+
+    // Remove entry from list
+    if (footer->prev) {
+        struct llist_footer *prev_footer = llist_generic_get_footer(l, footer->prev);
+        prev_footer->next = footer->next;
+    }
+    if (footer->next) {
+        struct llist_footer *next_footer = llist_generic_get_footer(l, footer->next);
+        next_footer->prev = footer->prev;
+    }
+
+    // Update first/last references in main struct if necessary
+    if (l->first == entry)
+        l->first = footer->next;
+    if (l->last == entry)
+        l->last = footer->prev;
+
+    free(entry);
+}
+
+void llist_generic_destroy(struct llist_generic *l) {
+    // Walk the list and destroy all entries
+    void *cur = l->first;
+    while (cur) {
+        struct llist_footer *footer = llist_generic_get_footer(l, cur);
+        void *next = footer->next;
+
+        llist_generic_remove(l, cur);
+
+        cur = next;
+    }
+}
 
 void free_destructor(void *element) {
     free(element);
