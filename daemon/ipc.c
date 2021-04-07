@@ -524,7 +524,7 @@ static void *server_receiver_thread(void *data_) {
 
                 // Close fds now that we're done forwarding them
                 if (fds) {
-                    for (uint8_t i=0; i<IPC_FD_MAX; i++) {
+                    for (uint8_t i=0; i<msg.fd_count; i++) {
                         if (fds[i] != -1)
                             close(fds[i]);
                     }
