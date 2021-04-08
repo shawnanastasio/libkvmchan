@@ -1,13 +1,14 @@
-SRCS:=library.c ringbuf.c
+SRCS:=library.c ringbuf.c daemon/util.c
 DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
-LIBS=-lrt -pthread
+LIBS:=-lrt -pthread
 DEBUG:=true
+LIB_CFLAGS:=-DUTIL_NO_ASSERT_ON_FAILURE
 
 SYSTEMD ?= 0
 
 DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
-	daemon/ipc.c daemon/connections.c daemon/localhandler.c
+	daemon/ipc.c daemon/connections.c daemon/localhandler.c daemon/page_allocator.c ringbuf.c
 DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
 DAEMON_BIN:=kvmchand
 DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)
@@ -51,10 +52,10 @@ library: $(DEPS)
 	$(CC) $(CFLAGS) $(DAEMON_CFLAGS) -o $@ -c $<
 
 %.o: %.c
-	$(CC) $(CFLAGS) -o $@ -c $<
+	$(CC) $(CFLAGS) $(LIB_CFLAGS) -o $@ -c $<
 
-daemon: $(DAEMON_DEPS) $(DEPS)
-	$(CC) $(CFLAGS) $(DAEMON_DEPS) $(DEPS) -o $(DAEMON_BIN) $(LIBS) $(DAEMON_LIBS)
+daemon: $(DAEMON_DEPS)
+	$(CC) $(CFLAGS) $(DAEMON_DEPS) -o $(DAEMON_BIN) $(LIBS) $(DAEMON_LIBS)
 
 build_test: $(DEPS) $(TEST_DEPS)
 	$(CC) $(CFLAGS) $(DEPS) $(TEST_DEPS) -o $(TEST_BIN) $(LIBS) $(TEST_LIBS)
