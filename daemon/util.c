@@ -110,15 +110,29 @@ struct llist_footer *llist_generic_get_footer(struct llist_generic *l, void *ptr
     return (struct llist_footer *)((char *)ptr + l->element_size);
 }
 
-void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *)) {
+struct llist_footer *llist_generic_get_footer_unsafe(void *ptr, size_t element_size) {
+    return (struct llist_footer *)((char *)ptr + element_size);
+}
+
+#ifdef UTIL_NO_ASSERT_ON_FAILURE
+#define ASSERT_OPTIONAL(x) (void)0
+#define ASSERT_OR_RETURN_NULL(x) do if (!(x)) return NULL; while (0)
+#else
+#define ASSERT_OPTIONAL(x) ASSERT(x)
+#define ASSERT_OR_RETURN_NULL(x) ASSERT(x)
+#endif
+
+void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *), void *user) {
     l->first = NULL;
     l->last = NULL;
     l->element_size = element_size;
     l->destructor = destructor;
+    l->user = user;
 }
 
 void *llist_generic_new_at_front(struct llist_generic *l) {
-    void *new_block = malloc_w(l->element_size + sizeof(struct llist_footer));
+    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    ASSERT_OR_RETURN_NULL(new_block);
     struct llist_footer *footer = llist_generic_get_footer(l, new_block);
     footer->prev = NULL;
     footer->next = l->first;
@@ -128,7 +142,8 @@ void *llist_generic_new_at_front(struct llist_generic *l) {
 }
 
 void *llist_generic_new_at_back(struct llist_generic *l) {
-    void *new_block = malloc_w(l->element_size + sizeof(struct llist_footer));
+    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    ASSERT_OR_RETURN_NULL(new_block);
     struct llist_footer *footer = llist_generic_get_footer(l, new_block);
     footer->prev = l->last;
     footer->next = NULL;
@@ -137,12 +152,32 @@ void *llist_generic_new_at_back(struct llist_generic *l) {
     return new_block;
 }
 
+void *llist_generic_new_after(struct llist_generic *l, void *entry) {
+    struct llist_footer *entry_footer = llist_generic_get_footer(l, entry);
+    ASSERT_OR_RETURN_NULL(entry_footer->parent_list == l);
+
+    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    ASSERT_OR_RETURN_NULL(new_block);
+    struct llist_footer *new_footer = llist_generic_get_footer(l, new_block);
+
+    new_footer->next = entry_footer->next;
+    new_footer->prev = entry;
+    new_footer->parent_list = l;
+    entry_footer->next = new_block;
+    if (new_footer->next) {
+        struct llist_footer *next_footer = llist_generic_get_footer(l, new_footer->next);
+        next_footer->prev = new_block;
+    }
+    return new_block;
+}
+
 void llist_generic_remove(struct llist_generic *l, void *entry) {
     struct llist_footer *footer = llist_generic_get_footer(l, entry);
-    ASSERT(footer->parent_list == l);
+    ASSERT_OPTIONAL(footer->parent_list == l);
 
     // Call user-provided destructor
-    l->destructor(entry);
+    if (l->destructor)
+        l->destructor(entry);
 
     // Remove entry from list
     if (footer->prev) {

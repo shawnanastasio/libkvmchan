@@ -120,7 +120,7 @@ static void domain_destructor(struct domain *domain) {
 }
 
 void connections_init(void) {
-    llist_domain_init(&connections.domains);
+    llist_domain_init(&connections.domains, NULL);
 }
 
 static struct domain *connections_get_dom(uint32_t dom) {

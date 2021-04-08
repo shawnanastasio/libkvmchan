@@ -27,10 +27,10 @@
 #include <sys/types.h>
 
 #define ARRAY_SIZE(x) (sizeof((x)) / sizeof(*(x)))
-
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
-
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
+
+#define __maybe_unused __attribute__((unused))
 
 // Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
 #if __has_include(<sys/memfd.h>)
@@ -84,42 +84,59 @@ struct llist_generic {
     void *last;
     size_t element_size;
     void (*destructor)(void *);
+    void *user;
 };
 struct llist_footer {
     struct llist_generic *parent_list;
     void *next;
     void *prev;
 };
-void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *));
+void llist_generic_init(struct llist_generic *l, size_t element_size, void (*destructor)(void *), void *user);
 void *llist_generic_new_at_front(struct llist_generic *l);
 void *llist_generic_new_at_back(struct llist_generic *l);
+void *llist_generic_new_after(struct llist_generic *l, void *entry);
 void llist_generic_remove(struct llist_generic *l, void *entry);
 void llist_generic_destroy(struct llist_generic *l);
 struct llist_footer *llist_generic_get_footer(struct llist_generic *l, void *ptr);
+struct llist_footer *llist_generic_get_footer_unsafe(void *ptr, size_t element_size);
 
 #define DECLARE_LLIST_FOR_TYPE(Tname, T, destructor_func) \
 struct llist_ ## Tname { struct llist_generic l; }; \
-void llist_ ## Tname ## _init(struct llist_ ## Tname *l) { \
+struct llist_ ## Tname ## _footer { /* MUST BE KEPT IN SYNC WITH struct llist_footer! */ \
+    struct llist_ ## Tname *parent_list; \
+    T *next; \
+    T *prev; \
+}; \
+__maybe_unused static void llist_ ## Tname ## _init(struct llist_ ## Tname *l, void *user) { \
     void (*destructor)(T *) = destructor_func; \
-    llist_generic_init((struct llist_generic *)l, sizeof(T), (void (*)(void *))destructor); \
+    return llist_generic_init((struct llist_generic *)l, sizeof(T), (void (*)(void *))destructor, user); \
 } \
-T *llist_ ## Tname ## _new_at_front(struct llist_ ## Tname *l) { \
+__maybe_unused static T *llist_ ## Tname ## _new_at_front(struct llist_ ## Tname *l) { \
     return (T *)llist_generic_new_at_front((struct llist_generic *)l); \
 } \
-T *llist_ ## Tname ## _new_at_back(struct llist_ ## Tname *l) { \
+__maybe_unused static T *llist_ ## Tname ## _new_at_back(struct llist_ ## Tname *l) { \
     return (T *)llist_generic_new_at_back((struct llist_generic *)l); \
 } \
-void llist_ ## Tname ## _remove(struct llist_ ## Tname *l, T *elem) { \
+__maybe_unused static T *llist_ ## Tname ## _new_after(struct llist_ ## Tname *l, T *elem) { \
+    return (T *)llist_generic_new_after((struct llist_generic *)l, elem); \
+} \
+__maybe_unused static void llist_ ## Tname ## _remove(struct llist_ ## Tname *l, T *elem) { \
     llist_generic_remove((struct llist_generic *)l, elem); \
 } \
-void llist_ ## Tname ## _destroy(struct llist_ ## Tname *l) { \
+__maybe_unused static void llist_ ## Tname ## _destroy(struct llist_ ## Tname *l) { \
     llist_generic_destroy((struct llist_generic *)l); \
+} \
+__maybe_unused static struct llist_ ## Tname ## _footer *llist_ ## Tname ## _get_footer(struct llist_ ## Tname *l, T *elem) { \
+    return (struct llist_ ## Tname ## _footer *)llist_generic_get_footer((struct llist_generic *)l, elem); \
+} \
+__maybe_unused static struct llist_ ## Tname ## _footer *llist_ ## Tname ## _get_footer_unsafe(T *elem, size_t element_size) { \
+    return (struct llist_ ## Tname ## _footer *)llist_generic_get_footer_unsafe(elem, element_size); \
 }
 
 #define llist_for_each(T, cur, list) \
-    for (T *next, *cur = (list)->l.first; \
-            (next = cur ? llist_generic_get_footer(&(list)->l, cur)->next : NULL, cur); \
-            cur = next)
+    for (T *cur = (list)->l.first, *next; \
+            (next = (void *)(cur ? llist_generic_get_footer(&(list)->l, cur)->next : NULL), cur); \
+            cur = (T *)next)
 
 
 void free_destructor(void *element);
