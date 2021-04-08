@@ -36,8 +36,9 @@
 #include <sys/ioctl.h>
 #include <linux/vfio.h>
 
-#include "libkvmchan.h"
+#include "daemon/util.h"
 #include "libkvmchan-priv.h"
+#include "libkvmchan.h"
 #include "ringbuf.h"
 
 // Delay between calls to
@@ -265,7 +266,7 @@ static bool do_shm_map(struct libkvmchan *chan, bool is_dom0, int shmfd) {
     }
 }
 
-static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_MAX]) {
+static bool get_conn_fds_deferred(uint32_t ivposition, int *fds_out, bool only_vfio_fd) {
     // When we're running on a guest, it may take up to a few seconds
     // for ivshmem devices to be attached and recognized by the kernel.
     // This means that the kvmchan server would have to block (and thus
@@ -281,7 +282,8 @@ static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_M
         struct kvmchand_message msg = {
             .command = KVMCHAND_CMD_GET_CONN_FDS,
             .args = {
-                ivposition
+                ivposition,
+                only_vfio_fd
             }
         };
         if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
@@ -299,6 +301,15 @@ static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_M
     return false;
 }
 
+#define INIT_GLOBAL_STATE() do { \
+        if ((errno = pthread_mutex_lock(&g_state.mutex))) \
+            return NULL; \
+        if (!(g_state.flags & STATE_FLAG_CONNECTED)) { \
+            if (!connect_to_daemon(&g_state)) \
+                return NULL; \
+        } \
+    } while (0)
+
 //
 // Public API
 //
@@ -311,13 +322,8 @@ static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_M
  * @param write_min minimum size of write ringbuf
  */
 struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t read_min, size_t write_min) {
+    INIT_GLOBAL_STATE();
     struct libkvmchan *ret = NULL;
-    if ((errno = pthread_mutex_lock(&g_state.mutex)))
-        return NULL;
-    if (!(g_state.flags & STATE_FLAG_CONNECTED)) {
-        if (!connect_to_daemon(&g_state))
-            goto out;
-    }
 
     // Initialize libkvmchan struct
     ret = malloc(sizeof(struct libkvmchan));
@@ -356,7 +362,7 @@ struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t
         // If we're not on dom0, we need to manually request the fds for this connection
         // static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_MAX]) {
         is_dom0 = false;
-        if (!get_conn_fds_deferred(ivposition, fds)) {
+        if (!get_conn_fds_deferred(ivposition, fds, false)) {
             goto out_fail_malloc_ret;
         }
     }
@@ -406,13 +412,8 @@ out:
 }
 
 static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t port) {
+    INIT_GLOBAL_STATE();
     struct libkvmchan *ret = NULL;
-    if ((errno = pthread_mutex_lock(&g_state.mutex)))
-        return NULL;
-    if (!(g_state.flags & STATE_FLAG_CONNECTED)) {
-        if (!connect_to_daemon(&g_state))
-            goto out;
-    }
 
     // Initialize libkvmchan struct
     ret = malloc(sizeof(struct libkvmchan));
@@ -453,7 +454,7 @@ static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t 
         // If we're not on dom0, we need to manually request the fds for this connection
         // static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_MAX]) {
         is_dom0 = false;
-        if (!get_conn_fds_deferred(ivposition, fds)) {
+        if (!get_conn_fds_deferred(ivposition, fds, false)) {
             goto out_fail_malloc_ret;
         }
     }
@@ -685,14 +686,8 @@ void libkvmchan_clear_eventfd(struct libkvmchan *chan) {
  * @param chan connection to close
  */
 bool libkvmchan_close(struct libkvmchan *chan) {
+    INIT_GLOBAL_STATE();
     bool ret = false;
-
-    if ((errno = pthread_mutex_lock(&g_state.mutex)))
-        return NULL;
-    if (!(g_state.flags & STATE_FLAG_CONNECTED)) {
-        if (!connect_to_daemon(&g_state))
-            goto out;
-    }
 
     // Close ringbufs
     ringbuf_close(&chan->host_to_client_rb);
@@ -812,4 +807,135 @@ int libkvmchan_get_state(struct libkvmchan *chan) {
         return -1;
 
     return kret.ret;
+}
+
+//
+// Shared Page API
+//
+
+// Internal representation of a shared region
+struct libkvmchan_shmem_region {
+    uint32_t peer_dom;
+    uint32_t region_id;
+    size_t page_count;
+    uint32_t ivposition; // ivposition of backing ivshmem device (dom > 0 only)
+
+    int type;
+#define SHMEM_REGION_TYPE_SERVER 0
+#define SHMEM_REGION_TYPE_CLIENT 1
+
+    union {
+        struct {
+            void *local_vaddr; // Address region is mapped at
+        } server;
+
+        struct {
+        } client;
+    };
+};
+static void shmem_region_destroy(struct libkvmchan_shmem_region *region);
+DECLARE_LLIST_FOR_TYPE(shmem_region, struct libkvmchan_shmem_region, shmem_region_destroy)
+
+// User-facing handle for shmem-related operations
+struct libkvmchan_shmem {
+    struct llist_shmem_region regions;
+};
+
+// Parameters
+struct libkvmchan_shmem_mmap_params {
+    size_t length;
+    int prot;
+    int flags;
+    int fd;
+    off_t offset;
+};
+
+static void shmem_region_destroy(struct libkvmchan_shmem_region *region) {
+    switch (region->type) {
+        case SHMEM_REGION_TYPE_SERVER:
+            // Unmap the region
+            munmap(region->server.local_vaddr, SYSTEM_PAGE_SIZE * region->page_count);
+            break;
+    }
+}
+
+// Obtain a libkvmchan_shmem handle for use with the shared memory API
+struct libkvmchan_shmem *libkvmchan_shmem_start(void) {
+    INIT_GLOBAL_STATE();
+
+    struct libkvmchan_shmem *handle = calloc(1, sizeof(struct libkvmchan_shmem));
+    if (!handle)
+        return NULL;
+
+    llist_shmem_region_init(&handle->regions, NULL);
+    return handle;
+}
+
+// Release a libkvmchan_shmem handle
+void libkvmchan_shmem_end(struct libkvmchan_shmem *handle) {
+    llist_shmem_region_destroy(&handle->regions);
+    free(handle);
+}
+
+// Create and map a shared memory region that can be accessed by `client_dom` using the returned `region_id`
+void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t client_dom,
+                                     size_t page_count, uint32_t *region_id_out) {
+    struct libkvmchan_shmem_region *new_region = llist_shmem_region_new_at_front(&handle->regions);
+    if (!new_region)
+        goto fail;
+
+    struct kvmchand_ret kret;
+    struct kvmchand_message msg = {
+        .command = KVMCHAND_CMD_SHMEM_CREATE,
+        .args = {
+            client_dom,
+            SYSTEM_PAGE_SIZE, // ignored by localhandler
+            page_count
+        }
+    };
+
+    int region_memfd = -1;
+    if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+        goto fail_new_region;
+    if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), &region_memfd) < 0)
+        goto fail_new_region;
+    if (kret.error)
+        goto fail_new_region;
+
+    uint32_t ivposition = (kret.ret >> 32) & 0xFFFFFFFF;
+    uint32_t region_id = kret.ret & 0xFFFFFFFF;
+    size_t start_offset = kret.ret2;
+
+    // Obtain the memfd if it wasn't returned to us
+    if (!kret.fd_count) {
+        if (!get_conn_fds_deferred(ivposition, &region_memfd, true))
+            goto fail_shmem_create;
+    }
+
+    // mmap the newly allocated pages if a memfd was given to us
+    void *region_start = NULL;
+    region_start = mmap(NULL, page_count * SYSTEM_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        region_memfd, start_offset);
+    if (region_start == (void *)-1)
+        goto fail_shmem_create;
+
+    // Populate local region struct and return
+    new_region->peer_dom = client_dom;
+    new_region->region_id = region_id;
+    new_region->page_count = page_count;
+    new_region->type = SHMEM_REGION_TYPE_SERVER;
+    new_region->ivposition = ivposition;
+    new_region->server.local_vaddr = region_start;
+
+    if (region_id_out)
+        *region_id_out = region_id;
+
+    return region_start;
+
+fail_shmem_create:
+    // send a close message to kvmchand
+fail_new_region:
+    llist_shmem_region_remove(&handle->regions, new_region);
+fail:
+    return NULL;
 }

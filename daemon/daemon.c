@@ -283,6 +283,17 @@ static void handle_message(struct ipc_message *msg) {
             response.resp.error = false;
             break;
 
+        case MAIN_IPC_CMD_SHMEM_CREATE:
+        {
+            enum connections_error ret = shmem_create((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2],
+                                                      (size_t)cmd->args[3], (uint32_t *)&response.resp.ret, (pid_t *)&response.resp.ret2,
+                                                      (uint32_t *)&response.resp.ret3, (size_t *)&response.resp.ret4);
+            response.resp.error = ret != CONNECTIONS_ERROR_NONE;
+            if (response.resp.error)
+                response.resp.ret = ret;
+            break;
+        }
+
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }

@@ -73,8 +73,8 @@ struct kvmchand_message {
 
     /**
      * Connect to an existing vchan.
-     * arg0 (int) - domain # of server
-     * arg1 (int) - port
+     * args[0] - (u32) domain # of server
+     * args[1] - (u32) port
      *
      * Note: In some cases it may not be possible to immediately return
      * all connection fds. In this case, ret will not indicate an error but
@@ -88,44 +88,64 @@ struct kvmchand_message {
 #define KVMCHAND_CMD_CLIENTINIT 2
 
     /**
-     * Get connection fds for an existing vchan
-     * arg0 (u32) - IVPosition of the ivshmem device backing the requested vchan
+     * Get connection fds for an existing vchan/shmem
+     * args[0] - (u32) IVPosition of the ivshmem device backing the requested vchan
+     * args[1] - (bool) only memfd?
      *
-     * ret (u32)
+     * fds_count - only_memfd ? 1 : 5
+     * fds - vchan shmfd, (!only_memfd) incoming eventfds 0-1, (!only_memfd) outgoing eventfds 0-1
      */
 #define KVMCHAND_CMD_GET_CONN_FDS 3
 
     /**
      * Close an existing vchan.
-     * arg0 (u32) - domain # of client
-     * arg1 (u32) - port
+     * args[0] - (u32) domain # of client
+     * args[1] - (u32) port
      */
 #define KVMCHAND_CMD_CLOSE 4
 
     /**
      * Register a client disconnect on a vchan.
-     * arg0 (u32) - domain # of server
-     * arg1 (u32) - port
+     * args[0] - (u32) domain # of server
+     * args[1] - (u32) port
      */
 #define KVMCHAND_CMD_CLIENT_DISCONNECT 5
 
     /**
      * Get the state of a vchan (client's perspective)
-     * arg0 (u32) - domain # of server
-     * arg1 (u32) - port
+     * args[0] - (u32) domain # of server
+     * args[1] - (u32) port
      *
-     * ret (int) - VCHAN_{DISCONNECTED,CONNECTED,WAITING}
+     * ret - (int) VCHAN_{DISCONNECTED,CONNECTED,WAITING}
      */
 #define KVMCHAND_CMD_GET_STATE_CLIENT 6
 
     /**
      * Get the state of a vchan (server's perspective)
-     * arg0 (u32) - domain # of client
-     * arg1 (u32) - port
+     * args[0] - (u32) domain # of client
+     * args[1] - (u32) port
      *
-     * ret (int) - VCHAN_{DISCONNECTED,CONNECTED,WAITING}
+     * ret - (int) VCHAN_{DISCONNECTED,CONNECTED,WAITING}
      */
 #define KVMCHAND_CMD_GET_STATE_SERVER 7
+
+    /**
+     * Create an shmem region for sharing with a given client dom
+     * args[0] - (u32)    domain # of client
+     * args[1] - (uint32) local page size (overridden by localhandler)
+     * args[2] - (size_t) page count
+     *
+     * Note: In some cases it may not be possible to immediately return
+     * all connection fds. In this case, ret will not indicate an error but
+     * the fd count will be 0 and the user must request the fds at a later time
+     * using KVMCHAND_CMD_GET_CONN_FDS.
+     *
+     * ret -  (u64) ((u32)ivposition_or_0 << 32 | (u32)region_id)
+     * ret2 - (size_t) start_offset
+     * fd_count - 1
+     * fds - backing shmfd
+     */
+#define KVMCHAND_CMD_SHMEM_CREATE 8
 
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
@@ -135,6 +155,7 @@ struct kvmchand_message {
  */
 struct kvmchand_ret {
     int64_t ret;
+    int64_t ret2;
     bool error;
 
     // Error codes, stored in `ret` when `error` is true

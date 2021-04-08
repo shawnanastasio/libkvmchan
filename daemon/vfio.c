@@ -1103,6 +1103,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
             log(LOGL_INFO, "resp from host: err: %d, ret: %d", ret.error, ret.ret);
             response.resp.error = ret.error;
             response.resp.ret = ret.ret;
+            response.resp.ret2 = ret.ret2;
 
             break;
         }
@@ -1110,6 +1111,7 @@ static void handle_ipc_message(struct ipc_message *msg) {
         case VFIO_IPC_CMD_GET_CONN_FDS:
         {
             uint32_t ivposition = (uint32_t)cmd->args[0];
+            bool only_memfd = cmd->args[1];
             struct vfio_connection *conn = vfio_conn_find_by_ivposition(g_vfio_data, g_ivshmem_devices,
                                                                         ivposition);
             if (!conn) {
@@ -1118,13 +1120,15 @@ static void handle_ipc_message(struct ipc_message *msg) {
             }
 
             // Return descriptors
-            response.fd_count = 5;
+            response.fd_count = only_memfd ? 1 : 5;
             response.flags = IPC_FLAG_FD;
             response.fds[0] = conn->device_fd;
-            response.fds[1] = conn->incoming_eventfds[0];
-            response.fds[2] = conn->incoming_eventfds[1];
-            response.fds[3] = conn->outgoing_eventfds[0];
-            response.fds[4] = conn->outgoing_eventfds[1];
+            if (!only_memfd) {
+                response.fds[1] = conn->incoming_eventfds[0];
+                response.fds[2] = conn->incoming_eventfds[1];
+                response.fds[3] = conn->outgoing_eventfds[0];
+                response.fds[4] = conn->outgoing_eventfds[1];
+            }
 
             response.resp.error = false;
             break;

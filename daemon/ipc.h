@@ -43,6 +43,8 @@ struct ipc_message {
         struct ipc_resp {
             int64_t ret;
             int64_t ret2;
+            int64_t ret3;
+            int64_t ret4;
             bool error;
         } resp;
     };
@@ -145,6 +147,22 @@ struct ipc_message {
  */
 #define MAIN_IPC_CMD_VCHAN_GET_STATE 5
 
+/**
+ * Create a new shared memory mapping.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of client
+ * args[2] - (u32) server page size
+ * args[3] - (size_t) number of pages to allocate
+ *
+ * resp.error - error?
+ * resp.ret  - (u32) On success, server's new IVPosition (if remote), else client's new IVPosition
+ *                   On failure, `enum connections_error` code.
+ * resp.ret2 - (pid_t)  PID of client qemu process (if remote)
+ * resp.ret3 - (u32)    ID for newly created shmem region
+ * resp.ret4 - (size_t) Offset into memfd/ivshmem_bar2 where this mapping starts
+ */
+#define MAIN_IPC_CMD_SHMEM_CREATE 6
+
 
 // libvirt process commands
 
@@ -228,13 +246,14 @@ struct ipc_message {
  * Get all file descriptors (memfd, 4x eventfd) for a given connection.
  * args[0] - (pid_t) QEMU pid that connection was made with
  * args[1] - (u32) IVPosition of connection
+ * args[2] - (bool) only memfd?
  *
  * resp.error - error?
  * resp.fds[0] - memfd
- * resp.fds[1] - incoming eventfd 0
- * resp.fds[2] - incoming eventfd 1
- * resp.fds[3] - outgoing eventfd 0
- * resp.fds[4] - outgoing eventfd 1
+ * resp.fds[1] - incoming eventfd 0 (args[2] == false)
+ * resp.fds[2] - incoming eventfd 1 (args[2] == false)
+ * resp.fds[3] - outgoing eventfd 0 (args[2] == false)
+ * resp.fds[4] - outgoing eventfd 1 (args[2] == false)
  */
 #define IVSHMEM_IPC_CMD_GET_CONN_FDS 1
 
@@ -275,13 +294,14 @@ struct ipc_message {
 /**
  * Get all file descriptors (VFIO device fd, 4x eventfd) for a given connection.
  * args[0] - (u32) IVPosition of connection
+ * args[1] - (bool) only memfd?
  *
  * resp.error - error?
  * fds[0] - VFIO device fd of corresponding ivshmem device
- * fds[1] - incoming eventfd 0
- * fds[2] - incoming eventfd 1
- * fds[3] - outgoing eventfd 0
- * fds[4] - outgoing eventfd 1
+ * fds[1] - incoming eventfd 0 (args[1] == false)
+ * fds[2] - incoming eventfd 1 (args[1] == false)
+ * fds[3] - outgoing eventfd 0 (args[1] == false)
+ * fds[4] - outgoing eventfd 1 (args[1] == false)
  */
 #define VFIO_IPC_CMD_GET_CONN_FDS 1
 

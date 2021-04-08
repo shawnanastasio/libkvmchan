@@ -869,11 +869,12 @@ static void handle_ipc_message(struct ipc_message *msg) {
 
         case IVSHMEM_IPC_CMD_GET_CONN_FDS:
         {
+            bool only_memfd = cmd->args[2];
             response.resp.error = !get_conn_fds(&g_server, (pid_t)cmd->args[0], (uint32_t)cmd->args[1],
                                                 response.fds);
 
             if (!response.resp.error) {
-                response.fd_count = 5;
+                response.fd_count = only_memfd ? 1 : 5;
                 response.flags = IPC_FLAG_FD;
             }
 

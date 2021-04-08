@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -31,6 +31,10 @@
 
 #define LIBKVMCHAN_EXPORTED __attribute__((__visibility__("default")))
 
+//
+// vchan API
+//
+
 struct libkvmchan;
 
 LIBKVMCHAN_EXPORTED struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t read_min,
@@ -48,5 +52,15 @@ LIBKVMCHAN_EXPORTED bool libkvmchan_close(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED size_t libkvmchan_data_ready(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED size_t libkvmchan_buffer_space(struct libkvmchan *chan);
 LIBKVMCHAN_EXPORTED int libkvmchan_get_state(struct libkvmchan *chan);
+
+//
+// Shared memory API
+//
+
+struct libkvmchan_shmem;
+
+LIBKVMCHAN_EXPORTED struct libkvmchan_shmem *libkvmchan_shmem_start(void);
+LIBKVMCHAN_EXPORTED void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t client_dom,
+                                                         size_t page_count, uint32_t *region_id_out);
 
 #endif // LIBKVMCHAN_H

@@ -33,6 +33,7 @@ enum connections_error {
     CONNECTIONS_ERROR_BAD_PORT,
     CONNECTIONS_ERROR_NOT_FOUND,
     CONNECTIONS_ERROR_INVALID_OP,
+    CONNECTIONS_ERROR_ALLOC_FAIL,
 };
 
 void connections_init(void);
@@ -45,5 +46,10 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 bool vchan_unregister_domain(pid_t pid);
 enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port);
+
+enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, size_t page_count,
+                                    uint32_t *ivpos_out, pid_t *client_pid_out, uint32_t *region_id_out,
+                                    size_t *start_off_out);
+
 
 #endif //KVMCHAND_CONNECTIONS_H
