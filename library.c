@@ -894,10 +894,10 @@ void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t c
         }
     };
 
-    int region_memfd = -1;
+    int fds[KVMCHAND_FD_MAX];
     if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
         goto fail_new_region;
-    if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), &region_memfd) < 0)
+    if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), fds) < 0)
         goto fail_new_region;
     if (kret.error)
         goto fail_new_region;
@@ -905,24 +905,25 @@ void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t c
     uint32_t ivposition = (kret.ret >> 32) & 0xFFFFFFFF;
     uint32_t region_id = kret.ret & 0xFFFFFFFF;
     size_t start_offset = kret.ret2;
+    bool is_dom0 = true;
 
     // Obtain the memfd if it wasn't returned to us
     if (!kret.fd_count) {
-        if (!get_conn_fds_deferred(ivposition, &region_memfd, true))
+        is_dom0 = false;
+        if (!get_conn_fds_deferred(ivposition, fds, true))
             goto fail_shmem_create;
     }
 
     // mmap the newly allocated pages if a memfd was given to us
-    void *region_start = NULL;
-    region_start = mmap(NULL, page_count * SYSTEM_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        region_memfd, start_offset);
-    if (region_start == (void *)-1)
+    void *region_start;
+    if (!do_shm_map(is_dom0, fds[0], start_offset, &region_start, NULL))
         goto fail_shmem_create;
 
     // Populate local region struct and return
     new_region->peer_dom = client_dom;
     new_region->region_id = region_id;
     new_region->page_count = page_count;
+    new_region->region_fd = fds[0];
     new_region->type = SHMEM_REGION_TYPE_SERVER;
     new_region->ivposition = ivposition;
     new_region->server.local_vaddr = region_start;
