@@ -2,10 +2,10 @@ SRCS:=library.c ringbuf.c daemon/util.c
 DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
 LIBS:=-lrt -pthread
-DEBUG:=true
 LIB_CFLAGS:=-DUTIL_NO_ASSERT_ON_FAILURE
-
+DEBUG ?= 1
 SYSTEMD ?= 0
+USE_ASAN ?= 0
 
 DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
 	daemon/ipc.c daemon/connections.c daemon/localhandler.c daemon/page_allocator.c ringbuf.c
@@ -29,8 +29,12 @@ TEST_LIBRARY_BIN:=test_library
 CFLAGS=-D_GNU_SOURCE=1 -O2 -Wall -Wextra -Wvla -fpic -fvisibility=hidden -std=gnu99 -I. \
 	   -fstack-protector-strong -D_FORITY_SOURCE=2
 
-ifneq ($(DEBUG),false)
+ifeq ($(DEBUG),1)
 CFLAGS += -g
+endif
+
+ifeq ($(USE_ASAN),1)
+CFLAGS += -fsanitize=address
 endif
 
 COMPILER_NAME:=$(shell $(CC) --version |cut -d' ' -f1 |head -n1)

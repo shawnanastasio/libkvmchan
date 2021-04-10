@@ -310,6 +310,16 @@ static void handle_message(struct ipc_message *msg) {
     }
 }
 
+// Address sanitizer's prctl function seems broken. Until this can be
+// investigated further, just invoke the syscall directly when asan is enaabled.
+#ifdef __SANITIZE_ADDRESS__
+#include <asm/unistd.h>
+#include <sys/syscall.h>
+#define prctl_w(...) syscall(__NR_prctl, __VA_ARGS__)
+#else
+#define prctl_w(...) prctl(__VA_ARGS__)
+#endif
+
 /**
  * Fork a child process and run its main loop.
  *
@@ -327,10 +337,10 @@ static void handle_message(struct ipc_message *msg) {
         pid_t p = fork(); \
         if (p == 0) { \
             /* Get notified when parent exits */ \
-            prctl(PR_SET_PDEATHSIG, SIGHUP); \
+            prctl_w(PR_SET_PDEATHSIG, SIGHUP, 0, 0, 0); \
             /* Set process name */ \
             const char *pr_name = "kvmchand_" name; \
-            prctl(PR_SET_NAME, (unsigned long)pr_name, 0, 0, 0); \
+            prctl_w(PR_SET_NAME, (unsigned long)pr_name, 0, 0, 0); \
             /* Close unused socketpair fd */ \
             close(sockpair[0]); \
             /* Call main loop */ \
