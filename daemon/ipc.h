@@ -43,8 +43,6 @@ struct ipc_message {
         struct ipc_resp {
             int64_t ret;
             int64_t ret2;
-            int64_t ret3;
-            int64_t ret4;
             bool error;
         } resp;
     };
@@ -153,13 +151,14 @@ struct ipc_message {
  * args[1] - (u32) domain # of client
  * args[2] - (u32) server page size
  * args[3] - (size_t) number of pages to allocate
+ * args[4] - (bool) return memfd?
  *
  * resp.error - error?
- * resp.ret  - (u32) On success, server's new IVPosition (if remote), else client's new IVPosition
- *                   On failure, `enum connections_error` code.
- * resp.ret2 - (pid_t)  PID of client qemu process (if remote)
- * resp.ret3 - (u32)    ID for newly created shmem region
- * resp.ret4 - (size_t) Offset into memfd/ivshmem_bar2 where this mapping starts
+ * resp.ret (lower 32 bits) - (u32) On success, server's new IVPosition (if remote), else client's new IVPosition
+ *                                  On failure, `enum connections_error` code.
+ * resp.ret (upper 32 bits) - (u32) ID for newly created shmem region
+ * resp.ret2                - (size_t) Offset into memfd/ivshmem_bar2 where this mapping starts
+ * resp.fds[0]              - memfd for region (only if args[4]==true)
  */
 #define MAIN_IPC_CMD_SHMEM_CREATE 6
 

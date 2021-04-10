@@ -491,6 +491,7 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
                         msg.args[0],
                         msg.args[1],
                         msg.args[2],
+                        false
                     },
                 },
                 .dest = IPC_DEST_MAIN,
@@ -504,11 +505,12 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
             if (ret.error)
                 break;
 
-            uint32_t ivposition = ipc_resp.resp.ret;
-            uint32_t region_id = ipc_resp.resp.ret3;
-            size_t offset = ipc_resp.resp.ret4;
+            uint32_t ivposition = ipc_resp.resp.ret & 0xFFFFFFFF;
+            uint32_t region_id = (ipc_resp.resp.ret >> 32) & 0xFFFFFFFF;
+            size_t start_offset = ipc_resp.resp.ret2;
+
             ret.ret = ((uint64_t)ivposition << 32) | region_id;
-            ret.ret2 = offset;
+            ret.ret2 = start_offset;
 
             break;
         }

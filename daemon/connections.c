@@ -868,21 +868,23 @@ fail_tag:
 }
 
 /**
- * Create a shared memory region between domains, using an existing connection if possible
+ * Create a shared memory region between domains, using an existing connection if possible,
  * or creating a new one otherwise.
+ *
  * @param server_dom            Domain number of server
  * @param client_dom            Domain number of client
  * @param page_size             Page size of requesting domain
  * @param page_count            Number of pages to allocate for this region
+ * @param include_memfd         Include file descriptor for shared memory region?
  * @param[out] ivpos_out        Newly allocated ivposition for server, or client if server is dom0
- * @param[out] client_pid_out   qemu PID of client, if client is remote
  * @param[out] region_id_out    ID of newly created shmem region
  * @param[out] start_off_out    Offset into memfd/ivshmem_bar2 where the allocated pages start
+ * @param[out] memfd_out        File descriptor for shared memory region (only if include_memfd)
  * @return                      IVPosition of server, or 0 on failure
  */
 enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, size_t page_count,
-                                    uint32_t *ivpos_out, pid_t *client_pid_out, uint32_t *region_id_out,
-                                    size_t *start_off_out) {
+                                    bool include_memfd, uint32_t *ivpos_out, uint32_t *region_id_out, size_t *start_off_out,
+                                    int *memfd_out) {
     log(LOGL_INFO, "shmem_create called! server_dom: %"PRIu32", client_dom %"PRIu32", page_count: %"PRIu64
                    ", page_size: %"PRIu32, server_dom, client_dom, page_count, page_size);
 
@@ -942,15 +944,15 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
     uint32_t client_ivposition = (client == conn->client) ? conn->client_ivposition : conn->server_ivposition;
 
     *ivpos_out = (server_dom > 0) ? server_ivposition : client_ivposition;
-    *client_pid_out = (client_dom > 0) ? client->pid : -1;
+    if (include_memfd)
+        *memfd_out = conn->memfd;
     *region_id_out = region_id;
     *start_off_out = region_start_offset;
 
-    log(LOGL_INFO, "shmem_create successfully allocated region. ivpos=%u, pid=%d, id=%u, start=%zu",
-            *ivpos_out, *client_pid_out, region_id, region_start_offset);
+    log(LOGL_INFO, "shmem_create successfully allocated region. ivpos=%u, id=%u, start=%zu",
+            *ivpos_out, region_id, region_start_offset);
 
     return CONNECTIONS_ERROR_NONE;
-
 }
 
 /**

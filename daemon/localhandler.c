@@ -735,6 +735,7 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
                         msg->args[0],
                         SYSTEM_PAGE_SIZE,
                         msg->args[2],
+                        true,
                     }
                 },
                 .dest = IPC_DEST_MAIN,
@@ -747,30 +748,16 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             if (ipc_resp.resp.error)
                 goto out;
 
-            uint32_t ivposition = ipc_resp.resp.ret;
-            uint32_t region_id = ipc_resp.resp.ret3;
-            size_t start_offset = ipc_resp.resp.ret4;
-
-            // Get all file descriptors for the connection
-            ipc_msg.cmd.command = IVSHMEM_IPC_CMD_GET_CONN_FDS;
-            ipc_msg.cmd.args[0] = (pid_t)ipc_resp.resp.ret2;
-            ipc_msg.cmd.args[1] = (uint32_t)ipc_resp.resp.ret;
-            ipc_msg.cmd.args[2] = true;
-            ipc_msg.dest = IPC_DEST_IVSHMEM;
-            if (!ipc_send_message(&ipc_msg, &ipc_resp))
-                goto out;
-            if (ipc_resp.resp.error) {
-                log(LOGL_ERROR, "Failed to get fds for shmem region!");
-                goto out;
-            }
-
-            ret.fd_count = 1;
-            memcpy(fds, ipc_resp.fds, ret.fd_count * sizeof(int));
+            uint32_t ivposition = ipc_resp.resp.ret & 0xFFFFFFFF;
+            uint32_t region_id = (ipc_resp.resp.ret >> 32) & 0xFFFFFFFF;
+            size_t start_offset = ipc_resp.resp.ret2;
 
             // Forward response to client
-            ret.error = ipc_resp.resp.error;
+            ret.error = false;
             ret.ret = region_id;
             ret.ret2 = start_offset;
+            ret.fd_count = 1;
+            memcpy(fds, ipc_resp.fds, ret.fd_count * sizeof(int));
 
             if (!ret.error)
                 record_shmem_create(client, msg, ivposition, region_id, start_offset);

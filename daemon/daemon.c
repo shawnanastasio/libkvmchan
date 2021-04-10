@@ -285,12 +285,26 @@ static void handle_message(struct ipc_message *msg) {
 
         case MAIN_IPC_CMD_SHMEM_CREATE:
         {
+            uint32_t ivposition;
+            uint32_t region_id;
+            size_t start_off;
+            int memfd = -1;
             enum connections_error ret = shmem_create((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2],
-                                                      (size_t)cmd->args[3], (uint32_t *)&response.resp.ret, (pid_t *)&response.resp.ret2,
-                                                      (uint32_t *)&response.resp.ret3, (size_t *)&response.resp.ret4);
+                                                      (size_t)cmd->args[3], (bool)cmd->args[4], &ivposition, &region_id, &start_off,
+                                                      &memfd);
+
             response.resp.error = ret != CONNECTIONS_ERROR_NONE;
-            if (response.resp.error)
+            if (response.resp.error) {
                 response.resp.ret = ret;
+            } else {
+                response.resp.ret = ((uint64_t)region_id << 32) | ivposition;
+                response.resp.ret2 = start_off;
+                if (memfd > 0) {
+                    response.flags = IPC_FLAG_FD;
+                    response.fd_count = 1;
+                    response.fds[0] = memfd;
+                }
+            }
             break;
         }
 
