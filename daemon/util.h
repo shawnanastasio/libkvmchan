@@ -83,6 +83,7 @@ struct llist_generic {
     void *first;
     void *last;
     size_t element_size;
+    size_t count;
     void (*destructor)(void *);
     void *user;
 };

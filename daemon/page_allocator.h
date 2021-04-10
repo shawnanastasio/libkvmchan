@@ -46,9 +46,10 @@ struct page_allocator {
 };
 
 void page_allocator_init(struct page_allocator *priv, size_t total_size, void (*tag_destructor)(void *));
-size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *tag);
+size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *tag, struct allocation_chunk **chunk_ptr_out);
 void page_allocator_free(struct page_allocator *priv, struct allocation_chunk *chunk);
 struct allocation_chunk *page_allocator_get_chunk_by_tag(struct page_allocator *priv, tag_comparator_t comparator, void *tag);
 void page_allocator_destroy(struct page_allocator *priv);
+struct page_allocator *page_allocator_get_parent_from_chunk(struct allocation_chunk *chunk);
 
 #endif // KVMCHAND_PAGE_ALLOCATOR_H

@@ -72,7 +72,7 @@ static void split_chunk_tail(struct page_allocator *priv, struct allocation_chun
     dump_chunks(priv);
 }
 
-size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *tag) {
+size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *tag, struct allocation_chunk **chunk_ptr_out) {
     fprintf(stderr, "requested allocation of size: %zu\n", size);
     dump_chunks(priv);
 
@@ -87,6 +87,8 @@ size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *t
             cur->tag = tag;
             cur->flags &= ~ALLOCATION_CHUNK_FLAG_FREE;
             dump_chunks(priv);
+            if (chunk_ptr_out)
+                *chunk_ptr_out = cur;
             return cur->start_offset;
         }
     }
@@ -98,21 +100,36 @@ size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *t
 void page_allocator_free(struct page_allocator *priv, struct allocation_chunk *chunk) {
     ASSERT((chunk->flags & ALLOCATION_CHUNK_FLAG_FREE) == 0);
     struct llist_allocation_chunk_footer *chunk_footer = llist_allocation_chunk_get_footer(&priv->chunks, chunk);
+    struct allocation_chunk *original_chunk = chunk;
     chunk->flags |= ALLOCATION_CHUNK_FLAG_FREE;
 
     // Coalesce forward
     if (chunk_footer->next && (chunk_footer->next->flags & ALLOCATION_CHUNK_FLAG_FREE)) {
+        // Next absorbs us
         struct allocation_chunk *next = chunk_footer->next;
-        chunk->length += next->length;
-        llist_allocation_chunk_remove(&priv->chunks, next);
+        next->length += chunk->length;
+        next->start_offset = chunk->start_offset;
+
+        llist_allocation_chunk_remove(&priv->chunks, chunk);
+
+        chunk = next;
     }
 
     // Coalesce backward
+    chunk_footer = llist_allocation_chunk_get_footer(&priv->chunks, chunk);
     if (chunk_footer->prev && (chunk_footer->prev->flags & ALLOCATION_CHUNK_FLAG_FREE)) {
+        // Prev absorbs us
         struct allocation_chunk *prev = chunk_footer->prev;
         prev->length += chunk->length;
+
         llist_allocation_chunk_remove(&priv->chunks, chunk);
+
+        chunk = prev;
     }
+
+    if (original_chunk == chunk)
+        // No coalescing took place, just delete the chunk
+        llist_allocation_chunk_remove(&priv->chunks, original_chunk);
 }
 
 struct allocation_chunk *page_allocator_get_chunk_by_tag(struct page_allocator *priv, tag_comparator_t comparator, void *tag) {
@@ -123,11 +140,17 @@ struct allocation_chunk *page_allocator_get_chunk_by_tag(struct page_allocator *
     return NULL;
 }
 
-
-void allocation_chunk_destroy(struct allocation_chunk *chunk) {
+struct page_allocator *page_allocator_get_parent_from_chunk(struct allocation_chunk *chunk) {
+    // Obtain the chunk's parent llist from its footer, then return the llist's user data pointer
+    // which was initialized to the parent page_allocator struct.
     struct llist_allocation_chunk *chunk_list = llist_allocation_chunk_get_footer_unsafe(chunk, sizeof(struct allocation_chunk))->parent_list;
     struct page_allocator *priv = chunk_list->l.user;
-    if (priv->tag_destructor)
+    return priv;
+}
+
+void allocation_chunk_destroy(struct allocation_chunk *chunk) {
+    struct page_allocator *priv = page_allocator_get_parent_from_chunk(chunk);
+    if (chunk->tag && priv->tag_destructor)
         priv->tag_destructor(chunk->tag);
 }
 

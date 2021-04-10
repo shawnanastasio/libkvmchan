@@ -60,7 +60,11 @@ LIBKVMCHAN_EXPORTED int libkvmchan_get_state(struct libkvmchan *chan);
 struct libkvmchan_shmem;
 
 LIBKVMCHAN_EXPORTED struct libkvmchan_shmem *libkvmchan_shmem_start(void);
+LIBKVMCHAN_EXPORTED void libkvmchan_shmem_end(struct libkvmchan_shmem *handle);
+
 LIBKVMCHAN_EXPORTED void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t client_dom,
                                                          size_t page_count, uint32_t *region_id_out);
+LIBKVMCHAN_EXPORTED int libkvmchan_shmem_region_close_by_id(struct libkvmchan_shmem *handle, uint32_t client_dom, uint32_t region_id);
+LIBKVMCHAN_EXPORTED int libkvmchan_shmem_region_close_by_ptr(struct libkvmchan_shmem *handle, uint32_t client_dom, void *ptr);
 
 #endif // LIBKVMCHAN_H

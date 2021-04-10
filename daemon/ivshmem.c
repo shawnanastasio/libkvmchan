@@ -327,7 +327,7 @@ static uint32_t client_get_domain(struct client_info *client) {
     return client->dom;
 
 fail:
-    log(LOGL_ERROR, "Failed to get domain number for client!\n");
+    log_BUG("Failed to get domain number for client");
     return 0;
 }
 
@@ -350,9 +350,6 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
         case KVMCHAND_CMD_SERVERINIT:
         {
             uint32_t dom = client_get_domain(client);
-            if (dom == 0)
-                break;
-
             struct ipc_message ipc_resp, ipc_msg = {
                 .type = IPC_TYPE_CMD,
                 .cmd = {
@@ -482,6 +479,64 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
             break;
         }
 
+        case KVMCHAND_CMD_SHMEM_CREATE:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_SHMEM_CREATE,
+                    .args = {
+                        dom,
+                        msg.args[0],
+                        msg.args[1],
+                        msg.args[2],
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+            if (ret.error)
+                break;
+
+            uint32_t ivposition = ipc_resp.resp.ret;
+            uint32_t region_id = ipc_resp.resp.ret3;
+            size_t offset = ipc_resp.resp.ret4;
+            ret.ret = ((uint64_t)ivposition << 32) | region_id;
+            ret.ret2 = offset;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_SHMEM_CLOSE:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_SHMEM_CLOSE,
+                    .args = {
+                        dom,
+                        msg.args[0],
+                        msg.args[1]
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+
+            break;
+        }
 
         default:
             /* unimplemented */

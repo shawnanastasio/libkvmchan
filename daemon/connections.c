@@ -84,12 +84,17 @@ struct connection {
 };
 static void connection_destroy(struct connection *conn);
 DECLARE_LLIST_FOR_TYPE(connection, struct connection, connection_destroy)
-DECLARE_LLIST_FOR_TYPE(connection_p, struct connection *, NULL)
 
-struct shmem_region_descriptor {
-    uint32_t peer_dom; // Domain number of peer
-    uint32_t id;       // Shared memory region id
+struct shmem_region_tag {
+    struct domain *server;
+    uint32_t client_dom;
+    uint32_t id;
+    int state; // CONNECTION_STATE_*
+
+    // Allocation chunk this region was assigned to
+    struct allocation_chunk *parent_chunk;
 };
+DECLARE_LLIST_FOR_TYPE(shmem_region_tag_p, struct shmem_region_tag *, NULL);
 
 struct domain {
     uint32_t dom;        // Domain ID
@@ -97,8 +102,8 @@ struct domain {
     uint32_t page_size;  // Peer's page size if known, or 0
     uint32_t last_shmem_region_id;
 
-    // Shared memory regions
-    struct vec_voidp shmem_region_ids;
+    // Shared memory regions this domain is the server of
+    struct llist_shmem_region_tag_p shmem_regions;
 };
 static void dom_init(struct domain *dom, uint32_t dom_nr, pid_t pid, uint32_t page_size);
 static void dom_destroy(struct domain *domain);
@@ -114,12 +119,8 @@ struct connections_db {
 static struct connections_db connections;
 
 static void connection_destroy(struct connection *conn) {
-    if (conn->memfd == 1)
-        log(LOGL_ERROR, "CLOSING FD 1!");
     close(conn->memfd);
     for (size_t i=0; i<ARRAY_SIZE(conn->eventfds); i++) {
-        if (conn->eventfds[i] == 1)
-            log(LOGL_ERROR, "CLOSING FD 1!");
         close(conn->eventfds[i]);
     }
 
@@ -265,7 +266,7 @@ static void dom_init(struct domain *dom, uint32_t dom_nr, pid_t pid, uint32_t pa
     dom->pid = pid;
     dom->page_size = page_size;
     dom->last_shmem_region_id = 0;
-    ASSERT(vec_voidp_init(&dom->shmem_region_ids, 10, free_destructor));
+    llist_shmem_region_tag_p_init(&dom->shmem_regions, NULL);
 }
 
 static void dom_destroy(struct domain *domain) {
@@ -276,52 +277,41 @@ static void dom_destroy(struct domain *domain) {
         }
     }
 
-    vec_voidp_destroy(&domain->shmem_region_ids);
+    // Sanity check: we shouldn't have any shmem_region_tag pointers left
+    // after destroying all connections
+    if (domain->shmem_regions.l.count) {
+        log(LOGL_WARN, "BUG: Memory leak: still have some shmem region pointers after destruction of all connections");
+    }
+
+    llist_shmem_region_tag_p_destroy(&domain->shmem_regions);
 }
 
-static struct shmem_region_descriptor *dom_get_shmem_descriptor_by_id(struct domain *domain, uint32_t region_id,
-                                                                      size_t *idx_out) {
-    for (size_t i = 0; i < domain->shmem_region_ids.count; i++) {
-        struct shmem_region_descriptor *cur = domain->shmem_region_ids.data[i];
-        if (cur->id == region_id) {
-            if (idx_out)
-                *idx_out = i;
-            return cur;
-        }
+static struct shmem_region_tag **dom_get_shmem_region_tag_by_id(struct domain *domain, uint32_t client_dom,
+                                                                uint32_t region_id) {
+    llist_for_each(struct shmem_region_tag *, cur_p, &domain->shmem_regions) {
+        struct shmem_region_tag *cur = *cur_p;
+        if (cur->client_dom != client_dom)
+            continue;
+        if (cur->id == region_id)
+            return cur_p;
     }
     return NULL;
 }
 
-static uint32_t dom_allocate_region_id(struct domain *server, uint32_t client_dom) {
-    if (server->shmem_region_ids.count >= UINT32_MAX - 1)
+static uint32_t dom_get_free_region_id(struct domain *server, uint32_t client_dom) {
+    if (server->shmem_regions.l.count >= UINT32_MAX - 1)
         return 0;
 
     // Find the first free ID starting at the last id + 1
     uint32_t cur_id;
     for (cur_id = server->last_shmem_region_id + 1;
-            cur_id == 0 || dom_get_shmem_descriptor_by_id(server, cur_id, NULL);
+            cur_id == 0 || dom_get_shmem_region_tag_by_id(server, client_dom, cur_id);
             cur_id++)
         ;
 
     server->last_shmem_region_id = cur_id;
 
-    // Allocate and insert a descriptor for the new region id
-    struct shmem_region_descriptor *desc = malloc_w(sizeof(struct shmem_region_descriptor));
-    desc->peer_dom = client_dom;
-    desc->id = cur_id;
-    ASSERT(vec_voidp_push_back(&server->shmem_region_ids, desc));
-
     return cur_id;
-}
-
-static void dom_release_region_id(struct domain *server, uint32_t region_id) {
-    size_t desc_idx;
-    if (!dom_get_shmem_descriptor_by_id(server, region_id, &desc_idx)) {
-        log(LOGL_WARN, "BUG? Tried to release unused shmem region id %"PRIu32" under server dom %"PRIu32,
-                region_id, server->dom);
-        return;
-    }
-    vec_voidp_remove(&server->shmem_region_ids, desc_idx);
 }
 
 //
@@ -779,23 +769,39 @@ int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
 #define MIN_PAGE_COUNT 64    /* 256KiB w/ 4k pages, 4MiB w/ 64k pages */
 static const uint32_t valid_page_sizes[] = {0x1000 /* 4k */, 0x4000 /* 16k */, 0x10000 /* 64k */};
 
-struct shmem_region_tag {
-    uint32_t server_dom;
-    uint32_t id;
-    int state; // CONNECTION_STATE_*
-};
-
-static struct shmem_region_tag *build_shmem_region_tag(uint32_t server_dom, uint32_t id) {
+static struct shmem_region_tag *shmem_region_tag_new(struct domain *server, uint32_t client_dom, uint32_t id) {
     struct shmem_region_tag *tag = malloc_w(sizeof(struct shmem_region_tag));
-    tag->server_dom = server_dom;
+    tag->server = server;
+    tag->client_dom = client_dom;
     tag->id = id;
     tag->state = CONNECTION_STATE_WAITING;
+    tag->parent_chunk = NULL;
+
+    // Store the allocation in the server domain's list
+    struct shmem_region_tag **tag_p = llist_shmem_region_tag_p_new_at_front(&server->shmem_regions);
+    *tag_p = tag;
+
     return tag;
+}
+
+static void shmem_region_tag_destroy(void *tag_) {
+    struct shmem_region_tag *tag = tag_;
+
+    // Remove this tag from the server's list, if online
+    struct shmem_region_tag **found_tag = dom_get_shmem_region_tag_by_id(tag->server, tag->client_dom, tag->id);
+    if (!found_tag) {
+        log(LOGL_WARN, "BUG? Couldn't find shmem tag in server domain's list at destruction");
+    } else {
+        ASSERT(*found_tag == tag);
+        llist_shmem_region_tag_p_remove(&tag->server->shmem_regions, found_tag);
+    }
+
+    free(tag);
 }
 
 static bool allocate_shmem_region(struct domain *server, struct domain *client, size_t region_size, uint32_t region_id,
                                   struct connection **conn_out, size_t *start_offset_out) {
-    struct shmem_region_tag *tag = build_shmem_region_tag(server->dom, region_id);
+    struct shmem_region_tag *tag = shmem_region_tag_new(server, client->dom, region_id);
 
     // First: Try to allocate pages in any existing connection between the two domains
     llist_for_each(struct connection, cur, &connections.connections) {
@@ -807,9 +813,8 @@ static bool allocate_shmem_region(struct domain *server, struct domain *client, 
 
         // Try to allocate `page_count` pages
         log(LOGL_INFO, "allocating shmem region in existing connection");
-        size_t start_offset = page_allocator_allocate(&cur->shmem.allocator, region_size, tag);
+        size_t start_offset = page_allocator_allocate(&cur->shmem.allocator, region_size, tag, &tag->parent_chunk);
         if (start_offset != (size_t)-1) {
-            // Allocation successful
             *conn_out = cur;
             *start_offset_out = start_offset;
             return true;
@@ -844,10 +849,10 @@ static bool allocate_shmem_region(struct domain *server, struct domain *client, 
     conn_p->memfd = memfd;
     conn_p->size = real_size;
     memcpy(conn_p->eventfds, eventfds, sizeof(eventfds));
-    page_allocator_init(&conn_p->shmem.allocator, real_size, free_destructor);
+    page_allocator_init(&conn_p->shmem.allocator, real_size, shmem_region_tag_destroy);
 
     // Allocate the pages in the newly created region
-    size_t start_offset = page_allocator_allocate(&conn_p->shmem.allocator, region_size, tag);
+    size_t start_offset = page_allocator_allocate(&conn_p->shmem.allocator, region_size, tag, &tag->parent_chunk);
     if (start_offset == (size_t)-1) {
         log(LOGL_WARN, "BUG? Unable to allocate shared memory in newly created region!");
         goto fail_tag;
@@ -858,7 +863,7 @@ static bool allocate_shmem_region(struct domain *server, struct domain *client, 
     return true;
 
 fail_tag:
-    free(tag);
+    shmem_region_tag_destroy(tag);
     return false;
 }
 
@@ -917,7 +922,7 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
     }
 
     // Allocate a region id for the server
-    uint32_t region_id = dom_allocate_region_id(server, client_dom);
+    uint32_t region_id = dom_get_free_region_id(server, client_dom);
     if (!region_id) {
         log(LOGL_WARN, "Failed to allocate shmem region id for domain %"PRIu32, server_dom);
         return CONNECTIONS_ERROR_INVALID_OP;
@@ -928,10 +933,15 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
     size_t region_start_offset;
     if (!allocate_shmem_region(server, client, page_size * page_count, region_id, &conn, &region_start_offset)) {
         log(LOGL_WARN, "Failed to allocate shmem pages");
-        goto fail_region_id;
+        return CONNECTIONS_ERROR_ALLOC_FAIL;
     }
 
-    *ivpos_out = (server_dom > 0) ? conn->server_ivposition : conn->client_ivposition;
+    // The server dom from the connection's perspective may be different from the server for this particular region,
+    // so we need to make sure they match up when returning ivpositions.
+    uint32_t server_ivposition = (server == conn->server) ? conn->server_ivposition : conn->client_ivposition;
+    uint32_t client_ivposition = (client == conn->client) ? conn->client_ivposition : conn->server_ivposition;
+
+    *ivpos_out = (server_dom > 0) ? server_ivposition : client_ivposition;
     *client_pid_out = (client_dom > 0) ? client->pid : -1;
     *region_id_out = region_id;
     *start_off_out = region_start_offset;
@@ -941,7 +951,33 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
 
     return CONNECTIONS_ERROR_NONE;
 
-fail_region_id:
-    dom_release_region_id(server, region_id);
-    return CONNECTIONS_ERROR_ALLOC_FAIL;
+}
+
+/**
+ * Close an existing shared memory mapping
+ */
+enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uint32_t region_id) {
+    log(LOGL_INFO, "shmem_close called! server_dom: %"PRIu32", client_dom %"PRIu32", region_id: %"PRIu32,
+            server_dom, client_dom, region_id);
+
+    struct domain *server = connections_get_dom_or_create_new(server_dom);
+    if (!server) {
+        log(LOGL_WARN, "Tried to close non-existent shmem region (server dom %"PRIu32" offline)", server_dom);
+        return CONNECTIONS_ERROR_DOM_OFFLINE;
+    }
+
+    // Find the corresponding tag for this mapping
+    struct shmem_region_tag **tag_p = dom_get_shmem_region_tag_by_id(server, client_dom, region_id);
+    if (!tag_p) {
+        log(LOGL_WARN, "Tried to close non-existent shmem region. server_dom=%"PRIu32", client_dom=%"PRIu32", region_id=%"PRIu32,
+                server_dom, client_dom, region_id);
+        return CONNECTIONS_ERROR_NOT_FOUND;
+    }
+
+    // Obtain the page allocator this shmem region was allocated with and free the chunk
+    struct allocation_chunk *chunk = (*tag_p)->parent_chunk;
+    struct page_allocator *allocator = page_allocator_get_parent_from_chunk(chunk);
+    page_allocator_free(allocator, chunk);
+
+    return CONNECTIONS_ERROR_NONE;
 }

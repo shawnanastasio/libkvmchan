@@ -126,6 +126,7 @@ void llist_generic_init(struct llist_generic *l, size_t element_size, void (*des
     l->first = NULL;
     l->last = NULL;
     l->element_size = element_size;
+    l->count = 0;
     l->destructor = destructor;
     l->user = user;
 }
@@ -137,7 +138,13 @@ void *llist_generic_new_at_front(struct llist_generic *l) {
     footer->prev = NULL;
     footer->next = l->first;
     footer->parent_list = l;
+    if (footer->next) {
+        struct llist_footer *next_footer = llist_generic_get_footer(l, footer->next);
+        ASSERT_OPTIONAL(!next_footer->prev);
+        next_footer->prev = new_block;
+    }
     l->first = new_block;
+    l->count++;
     return new_block;
 }
 
@@ -148,7 +155,13 @@ void *llist_generic_new_at_back(struct llist_generic *l) {
     footer->prev = l->last;
     footer->next = NULL;
     footer->parent_list = l;
+    if (footer->prev) {
+        struct llist_footer *prev_footer = llist_generic_get_footer(l, footer->prev);
+        ASSERT_OPTIONAL(!prev_footer->next);
+        prev_footer->next = new_block;
+    }
     l->last = new_block;
+    l->count++;
     return new_block;
 }
 
@@ -168,6 +181,7 @@ void *llist_generic_new_after(struct llist_generic *l, void *entry) {
         struct llist_footer *next_footer = llist_generic_get_footer(l, new_footer->next);
         next_footer->prev = new_block;
     }
+    l->count++;
     return new_block;
 }
 
@@ -195,6 +209,7 @@ void llist_generic_remove(struct llist_generic *l, void *entry) {
     if (l->last == entry)
         l->last = footer->prev;
 
+    l->count--;
     free(entry);
 }
 

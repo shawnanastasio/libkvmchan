@@ -133,7 +133,7 @@ struct ipc_message {
  * args[3] - (u32) port
  *
  * resp.error - error?
- * resp.ret - On failure, `enum connections_error` code.
+ * resp.ret - `enum connections_error` code.
  */
 #define MAIN_IPC_CMD_VCHAN_CLIENT_DISCONNECT 4
 
@@ -162,6 +162,17 @@ struct ipc_message {
  * resp.ret4 - (size_t) Offset into memfd/ivshmem_bar2 where this mapping starts
  */
 #define MAIN_IPC_CMD_SHMEM_CREATE 6
+
+/**
+ * Close a shared memory mapping.
+ * args[0] - (u32) server_dom
+ * args[1] - (u32) client_dom
+ * args[2] - (u32) region_id
+ *
+ * resp.error - error?
+ * resp.ret   - `enum connections_error` code.
+ */
+#define MAIN_IPC_CMD_SHMEM_CLOSE 7
 
 
 // libvirt process commands

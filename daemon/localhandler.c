@@ -137,6 +137,12 @@ static void client_destructor(void *client_) {
                 cleanup_msg.args[1] = cur->vchan_client.port;
                 break;
 
+            case CLIENT_HANDLE_TYPE_SHMEM_SERVER:
+                cleanup_msg.command = KVMCHAND_CMD_SHMEM_CLOSE;
+                cleanup_msg.args[0] = cur->shmem_server.client_dom;
+                cleanup_msg.args[1] = cur->shmem_server.region_id;
+                break;
+
             default:
                 log(LOGL_WARN, "Don't know how to cleanup handle type %d. Skipping.", cur->type);
                 continue;
@@ -165,7 +171,28 @@ static struct client *get_client_by_fd(struct localhandler_data *data, int fd) {
  * Hooks for recording server creation/destruction so that vchans can be
  * automatically cleaned up when client disconnects
  */
+
+#define DELETE_HANDLE_IF(client, handle_type, condition_macro) \
+    ({ \
+        bool found = false; \
+        for (size_t i = 0; i < (client)->handles.count; i++) { \
+            struct client_handle *cur = (client)->handles.data[i]; \
+            if (cur->type != (handle_type)) \
+                continue; \
+            \
+            if (condition_macro(cur)) { \
+                vec_voidp_remove(&client->handles, i); \
+                found = true; \
+                break; \
+            } \
+        } \
+        /* return */ found; \
+    })
+
 static void record_serverinit(struct client *client, struct kvmchand_message *msg) {
+    if (client->closed)
+        return;
+
     struct client_handle *handle = malloc_w(sizeof(struct client_handle));
     handle->destroying = false;
     handle->type = CLIENT_HANDLE_TYPE_VCHAN_SERVER;
@@ -175,6 +202,9 @@ static void record_serverinit(struct client *client, struct kvmchand_message *ms
 }
 
 static void record_clientinit(struct client *client, struct kvmchand_message *msg) {
+    if (client->closed)
+        return;
+
     struct client_handle *handle = malloc_w(sizeof(struct client_handle));
     handle->destroying = false;
     handle->type = CLIENT_HANDLE_TYPE_VCHAN_CLIENT;
@@ -184,49 +214,42 @@ static void record_clientinit(struct client *client, struct kvmchand_message *ms
 }
 
 static void record_close(struct client *client, struct kvmchand_message *msg) {
+    if (client->closed)
+        return;
+
     uint32_t client_dom = msg->args[0];
     uint32_t port = msg->args[1];
 
-    // Walk through all vchan server handles and see if one of them is about to be closed
-    for (size_t i = 0; i < client->handles.count; i++) {
-        struct client_handle *cur = client->handles.data[i];
-        if (cur->type != CLIENT_HANDLE_TYPE_VCHAN_SERVER)
-            continue;
+#define condition(handle) ( (handle)->vchan_server.client_dom == client_dom && (handle)->vchan_server.port == port )
+    if (DELETE_HANDLE_IF(client, CLIENT_HANDLE_TYPE_VCHAN_SERVER, condition))
+        return; // Handle successfully deleted
+#undef condition
 
-        if (cur->vchan_server.client_dom == client_dom && cur->vchan_server.port == port) {
-            if (!cur->destroying)
-                vec_voidp_remove(&client->handles, i);
-            return;
-        }
-    }
-
-    log(LOGL_INFO, "Recorded close for non-existent connection? cfd: %d, cdom: %u, port: %u",
-        client->fd, client_dom, port);
+    log_BUG("Recorded successful close for unknown vchan. client_dom=%"PRIu32", port=%"PRIu32,
+            client_dom, port);
 }
 
 static void record_client_disconnect(struct client *client, struct kvmchand_message *msg) {
+    if (client->closed)
+        return;
+
     uint32_t server_dom = msg->args[0];
     uint32_t port = msg->args[1];
 
-    // Walk through all vchan client handles and see if one of them is about to be closed
-    for (size_t i = 0; i < client->handles.count; i++) {
-        struct client_handle *cur = client->handles.data[i];
-        if (cur->type != CLIENT_HANDLE_TYPE_VCHAN_CLIENT)
-            continue;
+#define condition(handle) ( (handle)->vchan_client.server_dom == server_dom && (handle)->vchan_client.port == port )
+    if (DELETE_HANDLE_IF(client, CLIENT_HANDLE_TYPE_VCHAN_CLIENT, condition))
+        return; // Handle successfully deleted
+#undef condition
 
-        if (cur->vchan_client.server_dom == server_dom && cur->vchan_client.port == port) {
-            if (!cur->destroying)
-                vec_voidp_remove(&client->handles, i);
-            return;
-        }
-    }
-
-    log(LOGL_INFO, "Recorded client disconnect for non-existent connection? cfd: %d, sdom: %u, port: %u",
-        client->fd, server_dom, port);
+    log_BUG("Recorded successful client disconnect for unknown vchan. server_dom=%"PRIu32", port=%"PRIu32,
+            server_dom, port);
 }
 
 static void record_shmem_create(struct client *client, struct kvmchand_message *msg, uint32_t ivposition, uint32_t region_id,
                                 size_t start_offset) {
+    if (client->closed)
+        return;
+
     uint32_t client_dom = msg->args[0];
     size_t page_count = msg->args[2];
 
@@ -241,6 +264,22 @@ static void record_shmem_create(struct client *client, struct kvmchand_message *
     ASSERT(vec_voidp_push_back(&client->handles, handle));
 }
 
+static void record_shmem_close(struct client *client, struct kvmchand_message *msg) {
+    if (client->closed)
+        return;
+
+    uint32_t client_dom = msg->args[0];
+    uint32_t region_id = msg->args[1];
+
+    // Delete any matching shmem server handles
+#define condition(handle) ( (handle)->shmem_server.client_dom == client_dom && (handle)->shmem_server.region_id == region_id )
+    if (DELETE_HANDLE_IF(client, CLIENT_HANDLE_TYPE_SHMEM_SERVER, condition))
+        return; // Handle successfully deleted
+#undef condition
+
+    log_BUG("Recorded successful close of unknown shmem region. client_dom=%"PRIu32", region_id=%"PRIu32,
+            client_dom, region_id);
+}
 
 /**
  * Handle IPC mesages from other kvmchand processes
@@ -333,8 +372,7 @@ out:
 /**
  * Forward messages to dom 0 over VFIO
  */
-static bool defer_client_message(struct client *client, struct kvmchand_message *msg,
-                                 struct kvmchand_ret *ret) {
+static bool defer_client_message(struct kvmchand_message *msg, struct kvmchand_ret *ret) {
     // Pack the request into an IPC message and send to VFIO
     struct ipc_message ipc_resp, ipc_msg = {
         .type = IPC_TYPE_CMD,
@@ -360,15 +398,6 @@ static bool defer_client_message(struct client *client, struct kvmchand_message 
     ret->ret = ipc_resp.resp.ret;
     ret->error = ipc_resp.resp.error;
 
-    // Hooks for recording server open/close
-    if (!ret->error && msg->command == KVMCHAND_CMD_SERVERINIT)
-        record_serverinit(client, msg);
-    else if (!ret->error && msg->command == KVMCHAND_CMD_CLIENTINIT)
-        record_clientinit(client, msg);
-    else if (!ret->error && msg->command == KVMCHAND_CMD_CLOSE)
-        record_close(client, msg);
-    else if (!ret->error && msg->command == KVMCHAND_CMD_CLIENT_DISCONNECT)
-        record_client_disconnect(client, msg);
     return true;
 }
 
@@ -391,30 +420,69 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
             ret.error = false;
             break;
 
-        case KVMCHAND_CMD_SERVERINIT:
-        case KVMCHAND_CMD_CLIENTINIT:
-        case KVMCHAND_CMD_CLOSE:
-        case KVMCHAND_CMD_CLIENT_DISCONNECT:
         case KVMCHAND_CMD_GET_STATE_CLIENT:
         case KVMCHAND_CMD_GET_STATE_SERVER:
             // Defer the command to dom0 so that the operation can be performed.
             // Since it takes some time for the ivshmem device to show up,
             // don't immediately obtain the file descriptors. The user can
             // submit another call to obtain them.
-            defer_client_message(client, msg, &ret);
+            defer_client_message(msg, &ret);
+            break;
+
+        case KVMCHAND_CMD_SERVERINIT:
+            defer_client_message(msg, &ret);
+            if (!ret.error)
+                record_serverinit(client, msg);
+            break;
+
+        case KVMCHAND_CMD_CLIENTINIT:
+            defer_client_message(msg, &ret);
+            if (!ret.error)
+                record_clientinit(client, msg);
+            break;
+
+        case KVMCHAND_CMD_CLOSE:
+            defer_client_message(msg, &ret);
+            if (!ret.error)
+                record_close(client, msg);
+            break;
+
+        case KVMCHAND_CMD_CLIENT_DISCONNECT:
+            defer_client_message(msg, &ret);
+            if (!ret.error)
+                record_client_disconnect(client, msg);
+            break;
+
+        case KVMCHAND_CMD_SHMEM_CREATE:
+            // Overwrite arg[1] with our page size and defer
+            msg->args[1] = SYSTEM_PAGE_SIZE;
+            defer_client_message(msg, &ret);
+
+            uint32_t ivposition = (ret.ret >> 32) & 0xFFFFFFFF;
+            uint32_t region_id = ret.ret & 0xFFFFFFFF;
+            size_t start_offset = ret.ret2;
+            if (!ret.error)
+                record_shmem_create(client, msg, ivposition, region_id, start_offset);
+            break;
+
+        case KVMCHAND_CMD_SHMEM_CLOSE:
+            defer_client_message(msg, &ret);
+            if (!ret.error)
+                record_shmem_close(client, msg);
             break;
 
         case KVMCHAND_CMD_GET_CONN_FDS:
         {
             // Get file descriptors
             uint32_t server_ivpos = (uint32_t)msg->args[0];
+            bool only_vfio_fd = (bool)msg->args[1];
             struct ipc_message ipc_resp, ipc_msg = {
                 .type = IPC_TYPE_CMD,
                 .cmd = {
                     .command = VFIO_IPC_CMD_GET_CONN_FDS,
                     .args = {
                         server_ivpos,
-                        false,
+                        only_vfio_fd,
                     },
                 },
                 .dest = IPC_DEST_VFIO,
@@ -427,8 +495,7 @@ static bool handle_client_message_guest(struct client *client, struct kvmchand_m
             if (ipc_resp.resp.error)
                 break;
 
-            log(LOGL_INFO, "fds: {%d, %d, %d, %d, %d}", ipc_resp.fds[0], ipc_resp.fds[1], ipc_resp.fds[2], ipc_resp.fds[3], ipc_resp.fds[4]);
-            ret.fd_count = 5;
+            ret.fd_count = only_vfio_fd ? 1 : 5;
             memcpy(fds, ipc_resp.fds, ret.fd_count * sizeof(int));
 
             // Forward response to client
@@ -680,6 +747,10 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
             if (ipc_resp.resp.error)
                 goto out;
 
+            uint32_t ivposition = ipc_resp.resp.ret;
+            uint32_t region_id = ipc_resp.resp.ret3;
+            size_t start_offset = ipc_resp.resp.ret4;
+
             // Get all file descriptors for the connection
             ipc_msg.cmd.command = IVSHMEM_IPC_CMD_GET_CONN_FDS;
             ipc_msg.cmd.args[0] = (pid_t)ipc_resp.resp.ret2;
@@ -698,14 +769,39 @@ static bool handle_client_message_dom0(struct client *client, struct kvmchand_me
 
             // Forward response to client
             ret.error = ipc_resp.resp.error;
-            ret.ret = ipc_resp.resp.ret3;  // ret3 - region id
-            ret.ret2 = ipc_resp.resp.ret4; // ret4 - start_offset
+            ret.ret = region_id;
+            ret.ret2 = start_offset;
 
             if (!ret.error)
-                record_shmem_create(client, msg, ipc_resp.resp.ret, ipc_resp.resp.ret3, ipc_resp.resp.ret4);
+                record_shmem_create(client, msg, ivposition, region_id, start_offset);
 
             break;
+        }
 
+        case KVMCHAND_CMD_SHMEM_CLOSE:
+        {
+            // Forward message to MAIN over IPC
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_SHMEM_CLOSE,
+                    .args = {
+                        0,
+                        msg->args[0],
+                        msg->args[1],
+                    }
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                goto out;
+
+            ret.error = ipc_resp.resp.error;
+            if (!ret.error)
+                record_shmem_close(client, msg);
+
+            break;
         }
 
         default:

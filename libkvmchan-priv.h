@@ -147,6 +147,13 @@ struct kvmchand_message {
      */
 #define KVMCHAND_CMD_SHMEM_CREATE 8
 
+    /**
+     * Close an existing shmem region.
+     * args[0] - (u32) domain # of client
+     * args[1] - (u32) region id
+     */
+#define KVMCHAND_CMD_SHMEM_CLOSE 9
+
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };
 

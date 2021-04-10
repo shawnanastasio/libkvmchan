@@ -234,19 +234,18 @@ fail:
     return false;
 }
 
-static bool do_shm_map(struct libkvmchan *chan, bool is_dom0, int shmfd) {
+static bool do_shm_map(bool is_dom0, int shmfd, size_t offset, void **shm_out, size_t *shm_size_out) {
     if (is_dom0) {
         // mmap shmfd directly
         struct stat statbuf;
         if (fstat(shmfd, &statbuf) < 0)
             return false;
 
-        chan->shm_size = statbuf.st_size;
-        chan->shm = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, 0);
-        if (chan->shm == (void *)-1)
-            return false;
+        if (shm_size_out)
+            *shm_size_out = statbuf.st_size;
+        *shm_out = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, offset);
 
-        return true;
+        return (*shm_out != (void *)-1);
     } else {
         // Obtain the offset and size of BAR2 from the VFIO driver
         struct vfio_region_info reg = {
@@ -256,17 +255,15 @@ static bool do_shm_map(struct libkvmchan *chan, bool is_dom0, int shmfd) {
         if (ioctl(shmfd, VFIO_DEVICE_GET_REGION_INFO, &reg) < 0)
             return false;
 
-        // mmap the region
-        chan->shm_size = reg.size;
-        chan->shm = mmap(NULL, reg.size, PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, reg.offset);
-        if (chan->shm == (void *)-1)
-            return false;
+        if (shm_size_out)
+            *shm_size_out = reg.size;
+        *shm_out = mmap(NULL, reg.size, PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, reg.offset + offset);
 
-        return true;
+        return (*shm_out != (void *)-1);
     }
 }
 
-static bool get_conn_fds_deferred(uint32_t ivposition, int *fds_out, bool only_vfio_fd) {
+static bool get_conn_fds_deferred(uint32_t ivposition, int fds_out[KVMCHAND_FD_MAX], bool only_vfio_fd) {
     // When we're running on a guest, it may take up to a few seconds
     // for ivshmem devices to be attached and recognized by the kernel.
     // This means that the kvmchan server would have to block (and thus
@@ -367,7 +364,7 @@ struct libkvmchan *libkvmchan_server_init(uint32_t domain, uint32_t port, size_t
         }
     }
 
-    if (!do_shm_map(ret, is_dom0, fds[0]))
+    if (!do_shm_map(is_dom0, fds[0], 0, &ret->shm, &ret->shm_size))
         goto out_fail_fds;
 
     // Calculate size of ring buffers
@@ -459,7 +456,7 @@ static struct libkvmchan *libkvmchan_client_init_impl(uint32_t domain, uint32_t 
         }
     }
 
-    if (!do_shm_map(ret, is_dom0, fds[0]))
+    if (!do_shm_map(is_dom0, fds[0], 0, &ret->shm, &ret->shm_size))
         goto out_fail_fds;
 
     // Calculate size of ring buffers
@@ -814,11 +811,12 @@ int libkvmchan_get_state(struct libkvmchan *chan) {
 //
 
 // Internal representation of a shared region
-struct libkvmchan_shmem_region {
+struct shmem_region {
     uint32_t peer_dom;
-    uint32_t region_id;
+    uint32_t id;
     size_t page_count;
     uint32_t ivposition; // ivposition of backing ivshmem device (dom > 0 only)
+    int fd;
 
     int type;
 #define SHMEM_REGION_TYPE_SERVER 0
@@ -833,8 +831,8 @@ struct libkvmchan_shmem_region {
         } client;
     };
 };
-static void shmem_region_destroy(struct libkvmchan_shmem_region *region);
-DECLARE_LLIST_FOR_TYPE(shmem_region, struct libkvmchan_shmem_region, shmem_region_destroy)
+static void shmem_region_destroy(struct shmem_region *region);
+DECLARE_LLIST_FOR_TYPE(shmem_region, struct shmem_region, shmem_region_destroy)
 
 // User-facing handle for shmem-related operations
 struct libkvmchan_shmem {
@@ -850,13 +848,15 @@ struct libkvmchan_shmem_mmap_params {
     off_t offset;
 };
 
-static void shmem_region_destroy(struct libkvmchan_shmem_region *region) {
+static void shmem_region_destroy(struct shmem_region *region) {
     switch (region->type) {
         case SHMEM_REGION_TYPE_SERVER:
             // Unmap the region
             munmap(region->server.local_vaddr, SYSTEM_PAGE_SIZE * region->page_count);
             break;
     }
+
+    close(region->fd);
 }
 
 // Obtain a libkvmchan_shmem handle for use with the shared memory API
@@ -880,7 +880,7 @@ void libkvmchan_shmem_end(struct libkvmchan_shmem *handle) {
 // Create and map a shared memory region that can be accessed by `client_dom` using the returned `region_id`
 void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t client_dom,
                                      size_t page_count, uint32_t *region_id_out) {
-    struct libkvmchan_shmem_region *new_region = llist_shmem_region_new_at_front(&handle->regions);
+    struct shmem_region *new_region = llist_shmem_region_new_at_front(&handle->regions);
     if (!new_region)
         goto fail;
 
@@ -921,9 +921,9 @@ void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t c
 
     // Populate local region struct and return
     new_region->peer_dom = client_dom;
-    new_region->region_id = region_id;
+    new_region->id = region_id;
     new_region->page_count = page_count;
-    new_region->region_fd = fds[0];
+    new_region->fd = fds[0];
     new_region->type = SHMEM_REGION_TYPE_SERVER;
     new_region->ivposition = ivposition;
     new_region->server.local_vaddr = region_start;
@@ -934,9 +934,71 @@ void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t c
     return region_start;
 
 fail_shmem_create:
-    // send a close message to kvmchand
+    // Send a close message to kvmchand
+    {
+        struct kvmchand_ret kret;
+        struct kvmchand_message msg = {
+            .command = KVMCHAND_CMD_SHMEM_CLOSE,
+            .args = {
+                client_dom,
+                region_id,
+            },
+        };
+
+        // Don't care whether this succeeded or not - we're already in the failure path
+        ignore_value(localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0));
+        ignore_value(localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL));
+    }
 fail_new_region:
     llist_shmem_region_remove(&handle->regions, new_region);
 fail:
     return NULL;
+}
+
+static int shmem_close(struct libkvmchan_shmem *handle, struct shmem_region *region) {
+    if (region->type != SHMEM_REGION_TYPE_SERVER)
+        return -1;
+
+    // Notify kvmchand that we wish to close this region
+    struct kvmchand_ret kret;
+    struct kvmchand_message msg = {
+        .command = KVMCHAND_CMD_SHMEM_CLOSE,
+        .args = {
+            region->peer_dom,
+            region->id,
+        },
+    };
+    if (localmsg_send(g_state.socfd, &msg, sizeof(msg), NULL, 0) < 0)
+        return -1;
+    if (localmsg_recv(g_state.socfd, &kret, sizeof(kret), NULL) < 0)
+        return -1;
+
+    // Remove this region from the handle's list
+    llist_shmem_region_remove(&handle->regions, region);
+
+    return 0;
+}
+
+int libkvmchan_shmem_region_close_by_id(struct libkvmchan_shmem *handle, uint32_t client_dom, uint32_t region_id) {
+    llist_for_each(struct shmem_region, cur, &handle->regions) {
+        if (cur->type != SHMEM_REGION_TYPE_SERVER)
+            continue;
+
+        if (cur->peer_dom == client_dom && cur->id == region_id)
+            return shmem_close(handle, cur);
+    }
+
+    return -1;
+}
+
+int libkvmchan_shmem_region_close_by_ptr(struct libkvmchan_shmem *handle, uint32_t client_dom, void *ptr) {
+    llist_for_each(struct shmem_region, cur, &handle->regions) {
+        if (cur->type != SHMEM_REGION_TYPE_SERVER)
+            continue;
+
+        if (cur->peer_dom == client_dom && cur->server.local_vaddr == ptr)
+            return shmem_close(handle, cur);
+    }
+
+    return -1;
 }
