@@ -1100,7 +1100,6 @@ static void handle_ipc_message(struct ipc_message *msg) {
                 break;
             }
 
-            log(LOGL_INFO, "resp from host: err: %d, ret: %d", ret.error, ret.ret);
             response.resp.error = ret.error;
             response.resp.ret = ret.ret;
             response.resp.ret2 = ret.ret2;
