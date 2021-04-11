@@ -971,7 +971,7 @@ static bool connect_to_host_daemon(struct vfio_data *data, struct vec_voidp *ivs
     }
 
     if (ret.ret != KVMCHAND_API_VERSION) {
-        log(LOGL_ERROR, "Host kvmchand uses API version %llu but we're on %llu! Aborting.", ret,
+        log(LOGL_ERROR, "Host kvmchand uses API version %"PRId64" but we're on %d! Aborting.", ret.ret,
             KVMCHAND_API_VERSION);
         goto fail_mmap_shared;
     }
@@ -1191,7 +1191,7 @@ void run_vfio_loop(int mainsoc) {
     g_ivshmem_devices = &ivshmem_devices;
 
     for (size_t i=0; i<ivshmem_devices.count; i++) {
-        log(LOGL_INFO, "Got ivshmem device: %s", ivshmem_devices.data[i]);
+        log(LOGL_INFO, "Got ivshmem device: %s", (char *)ivshmem_devices.data[i]);
     }
 
     // Validate vfio configuration

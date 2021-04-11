@@ -515,7 +515,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     // Make sure that there isn't already an active connection on this server/port
     struct connection *existing = connections_get_vchan_by_dom(server_dom, client_dom, port);
     if (existing && existing->vchan.state != CONNECTION_STATE_FREE) {
-        log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu64" port %"PRIu32, server_dom, port);
+        log(LOGL_WARN, "Rejecting duplicate vchan on server %"PRIu32" port %"PRIu32, server_dom, port);
         return false;
     }
 

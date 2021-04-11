@@ -233,7 +233,7 @@ fail:
 static bool get_conn_fds(struct ivshmem_server *server, pid_t pid, uint32_t ivposition, int *fds_out) {
     struct client_info *info = get_client(server, pid, false, NULL);
     if (!info) {
-        log(LOGL_INFO, "No client found for pid %ld ivposition %d!", pid, ivposition);
+        log(LOGL_INFO, "No client found for pid %d ivposition %"PRIu32"!", pid, ivposition);
         return false;
     }
 

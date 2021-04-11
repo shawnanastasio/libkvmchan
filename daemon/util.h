@@ -57,6 +57,7 @@ enum loop_msg_type {
 #define log(level, fmt, ...) log_impl(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define log_BUG(fmt, ...) do { log(LOGL_BUG, fmt, ##__VA_ARGS__); bail_out(); } while (0)
 
+__attribute__((format(printf, 4, 5)))
 void log_impl(enum log_level level, const char *file, int line, const char *fmt, ...);
 
 #define vec_template_proto(Tname, T) \

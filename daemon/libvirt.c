@@ -585,8 +585,10 @@ static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
             }
 
             break;
+
         default:
-            log(LOGL_WARN, "Unknown lifecycle event %d! Ignoring...");
+            // Ignore unknown event
+            break;
     }
     return 0;
 }
