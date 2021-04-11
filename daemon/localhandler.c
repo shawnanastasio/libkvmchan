@@ -858,6 +858,12 @@ void run_localhandler_loop(int mainsoc, bool is_dom0) {
     if (chmod(LOCALHANDLER_SOCK_PATH, 0666) < 0)
         goto error;
 
+    // Drop root privileges
+    if (!drop_privileges()) {
+        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
+        goto error;
+    }
+
     // Install exit handler to remove socket
     if (!install_exit_callback(cleanup_socket_path, (void *)LOCALHANDLER_SOCK_PATH))
         goto error;

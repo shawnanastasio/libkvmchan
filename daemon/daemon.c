@@ -400,6 +400,12 @@ static void host_main(void) {
     if (localhandler < 0)
         goto fail_errno;
 
+    // Drop root privileges
+    if (!drop_privileges()) {
+        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
+        goto fail_errno;
+    }
+
     // Initialize connections database
     connections_init();
 
@@ -439,6 +445,12 @@ static void guest_main(void) {
     localhandler = spawn_child_loop("localhandler", main_localhandler_sv, run_localhandler_loop, false);
     if (localhandler < 0)
         goto fail_errno;
+
+    // Drop root privileges
+    if (!drop_privileges()) {
+        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
+        goto fail_errno;
+    }
 
     // listen for messages
     int sockets[NUM_IPC_SOCKETS];

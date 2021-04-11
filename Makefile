@@ -2,10 +2,17 @@ SRCS:=library.c ringbuf.c daemon/util.c
 DEPS:=$(SRCS:.c=.o)
 BIN:=libkvmchan.so
 LIBS:=-lrt -pthread
-LIB_CFLAGS:=-DUTIL_NO_ASSERT_ON_FAILURE
+LIB_CFLAGS:=-DUTIL_NO_ASSERT_ON_FAILURE -DKVMCHAN_LIBRARY
+
+# Build options
 DEBUG ?= 1
 SYSTEMD ?= 0
 USE_ASAN ?= 0
+USE_PRIVSEP ?= 1
+
+# Build-time behavior configuration
+PRIVSEP_USER ?= kvmchand
+PRIVSEP_GROUP ?= kvmchand
 
 DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
 	daemon/ipc.c daemon/connections.c daemon/localhandler.c daemon/page_allocator.c ringbuf.c
@@ -17,6 +24,11 @@ ifeq ($(SYSTEMD),1)
 DAEMON_CFLAGS += -DHAVE_SYSTEMD
 DAEMON_LIBS += `pkg-config --libs libsystemd || pkg-config --libs libsystemd-daemon`
 endif
+
+ifeq ($(USE_PRIVSEP),1)
+DAEMON_CFLAGS += -DUSE_PRIVSEP -DPRIVSEP_USER=\"$(PRIVSEP_USER)\" -DPRIVSEP_GROUP=\"$(PRIVSEP_GROUP)\"
+endif
+
 
 TEST_SRCS:=test.c
 TEST_DEPS:=$(TEST_SRCS:.c=.o)
@@ -41,6 +53,9 @@ COMPILER_NAME:=$(shell $(CC) --version |cut -d' ' -f1 |head -n1)
 ifneq ($(COMPILER_NAME),clang)
 # This flag is GCC-only
 CFLAGS += -fstack-clash-protection
+
+# -Wstringop-truncation results in false-positives w/ strncpy and explicit null termination
+CFLAGS += -Wno-stringop-truncation
 endif
 
 PREFIX ?= /usr/local

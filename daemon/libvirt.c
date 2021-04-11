@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2020 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -741,6 +741,12 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
     if (virConnectRegisterCloseCallback(conn, connect_close_callback, NULL,
                                         NULL) < 0) {
         log(LOGL_ERROR, "Unable to register close callback");
+        goto error;
+    }
+
+    // Drop root privileges
+    if (!drop_privileges()) {
+        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto error;
     }
 

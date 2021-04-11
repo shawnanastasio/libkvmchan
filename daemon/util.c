@@ -30,6 +30,11 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 
+#ifdef USE_PRIVSEP
+#include <pwd.h>
+#include <grp.h>
+#endif
+
 #include "util.h"
 
 long SYSTEM_PAGE_SIZE;
@@ -440,3 +445,88 @@ bool eventfd_sem_wait_or(int evfd, int other) {
     }
 }
 
+#ifdef USE_PRIVSEP
+static uid_t get_uid_for_username(const char *username) {
+    uid_t ret = (uid_t)-1;
+
+    long getpw_max = sysconf(_SC_GETPW_R_SIZE_MAX);
+    if (getpw_max == -1)
+        goto out;
+
+    struct passwd passwd_storage;
+    char *passwd_buf = malloc_w(getpw_max);
+    struct passwd *result;
+    int res = getpwnam_r(username, &passwd_storage, passwd_buf, getpw_max, &result);
+    if (res != 0 || !result) {
+        log(LOGL_ERROR, "Failed to lookup UID for username %s", username);
+        goto out_malloc;
+    }
+
+    ret = result->pw_uid;
+
+out_malloc:
+    free(passwd_buf);
+out:
+    return ret;
+}
+
+static gid_t get_gid_for_groupname(const char *groupname) {
+    gid_t ret = (gid_t)-1;
+
+    long getgr_max = sysconf(_SC_GETGR_R_SIZE_MAX);
+    if (getgr_max == -1)
+        goto out;
+
+    struct group group_storage;
+    char *group_buf = malloc_w(getgr_max);
+    struct group *result;
+    int res = getgrnam_r(groupname, &group_storage, group_buf, getgr_max, &result);
+    if (res != 0 || !result) {
+        log(LOGL_ERROR, "Failed to lookup GID for groupname %s", groupname);
+        goto out_malloc;
+    }
+
+    ret = result->gr_gid;
+
+out_malloc:
+    free(group_buf);
+out:
+    return ret;
+}
+#endif
+
+bool drop_privileges(void) {
+#ifdef USE_PRIVSEP
+#if !defined(PRIVSEP_USER) || !defined(PRIVSEP_GROUP)
+#error "Built with USE_PRIVSEP but no PRIVSEP_USER/PRIVSEP_GROUP was defined!"
+#endif
+
+    gid_t target_gid = get_gid_for_groupname(PRIVSEP_GROUP);
+    if (target_gid == (gid_t)-1)
+        return false;
+
+    uid_t target_uid = get_uid_for_username(PRIVSEP_USER);
+    if (target_uid == (uid_t)-1)
+        return false;
+
+    if (setgid(target_gid) != 0) {
+        log(LOGL_ERROR, "setgid() failed: %m");
+        return false;
+    }
+
+    if (setuid(target_uid) != 0) {
+        log(LOGL_ERROR, "setuid() failed: %m");
+        return false;
+    }
+
+    return true;
+
+#else
+
+#ifndef KVMCHAN_LIBRARY
+#warning "Building without privilege separation - kvmchand will run as root at all times!"
+#endif
+    return true;
+
+#endif
+}

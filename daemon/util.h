@@ -182,8 +182,9 @@ bool install_exit_callback(void (*func)(void*), void *arg);
 void run_exit_callbacks(void);
 __attribute__((noreturn)) void bail_out(void);
 
-
 ssize_t socmsg_send(int socfd, void *data, size_t len, int fd);
 ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out);
+
+bool drop_privileges(void);
 
 #endif // KVMCHAND_UTIL_H
