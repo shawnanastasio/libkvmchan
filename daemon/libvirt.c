@@ -44,9 +44,6 @@
 #include <libvirt/libvirt-qemu.h>
 #include <libvirt/virterror.h>
 
-#include <libxml/tree.h>
-#include <libxml/xpath.h>
-
 #include "config.h"
 #include "util.h"
 #include "libvirt.h"
@@ -462,50 +459,6 @@ static bool detach_ivshmem_by_id(uint32_t dom_id, uint32_t ivposition) {
     return true;
 }
 
-#if 0
-static bool spawn_kvmchan_listener(virDomainPtr dom) {
-    // Dump the VM configuration and check for the appropriate ivshmem devices
-    const char *xml = virDomainGetXMLDesc(dom, 0);
-    if (!xml) {
-        log(LOGL_ERROR, "Failed to obtain XML for domain %d!", virDomainGetID(dom));
-        return;
-    }
-
-    // Parse the XML into a libxml DOM object
-    xmlDocPtr doc = xmlParseDoc((const xmlChar *)xml);
-    if (!doc) {
-        log(LOGL_ERROR, "Failed to parse XML for domain %d!", virDomainGetID(dom));
-        return;
-    }
-
-    // Confirm that the document is a valid libvirt KVM domain
-    xmlNodePtr node = xmlDocGetRootElement(doc);
-    if (xmlStrcmp(node->name, (const xmlChar *)"domain")) {
-        log(LOGL_ERROR, "Invalid XML returned for domain %d!", virDomainGetID(dom));
-        return;
-    }
-
-    const xmlChar *type = xmlGetProp(node, (const xmlChar *)"type");
-    if (!type || xmlStrcmp(type, (const xmlChar *)"kvm")) {
-        log(LOGL_ERROR, "Invalid domain type for domain %d, only KVM is supported.",
-            virDomainGetID(dom));
-        return;
-    }
-
-    log(LOGL_INFO, "Successfully parsed Domain XML!");
-
-    // Lookup all ivshmem devices
-    xmlXPathContextPtr context = xmlXPathNewContext(doc);
-    xmlXPathObjectPtr result = xmlXPathEvalExpression((const xmlChar *)"/domain/devices/shmem",
-                                                      context);
-
-    if (xmlXPathNodeSetIsEmpty(result->nodesetval)) {
-        xmlXPathFreeObject(result);
-    }
-    return true;
-}
-#endif
-
 static int lifecycle_change_callback(virConnectPtr conn, virDomainPtr dom,
                                      int event, int detail, void *opaque) {
     ignore_value(conn);
@@ -761,56 +714,11 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
         goto error;
     }
 
-    // Establish initial list of running domains
-    int n_domains = virConnectNumOfDomains(conn);
-    if (!vec_voidp_init(&running_domains, n_domains, free_destructor))
+    // Initialize list of running domains
+    if (!vec_voidp_init(&running_domains, 10, free_destructor))
         goto error;
-
     if (sem_init(&running_domains_sem, 0, 1) < 0)
         goto error;
-
-    if (n_domains > 0) {
-        int *domains = calloc(n_domains, sizeof(int));
-        if (!domains) {
-            log(LOGL_ERROR, "Failed to allocate memory: %s!", strerror(errno));
-            goto error;
-        }
-
-        n_domains = virConnectListDomains(conn, domains, n_domains);
-        // Get name of each domain and add to running_domains
-        for (int i=0; i<n_domains; i++) {
-            virDomainPtr p = virDomainLookupByID(conn, domains[i]);
-            if (!p) {
-                log(LOGL_ERROR, "Failed to lookup domain!");
-                free(domains);
-                goto error;
-            }
-
-            struct domain_info *info = malloc_w(sizeof(struct domain_info));
-            if (virDomainGetUUIDString(p, info->uuid_str)) {
-                log(LOGL_ERROR, "Failed to lookup domain UUID!");
-                free(domains);
-                goto error;
-            }
-
-            if (!find_qemu_process_pid(info->uuid_str, &info->pid)) {
-                log(LOGL_WARN, "Failed to lookup domain PID!");
-                free(domains);
-                goto error;
-            }
-
-            // Create a new ivshmem device on the guest
-            // that will be used for guest<->kvmchand communication
-            if (!attach_ivshmem_device(p, IVSHMEM_SOCK_PATH, 0)) {
-                log(LOGL_WARN, "Failed to attach ivshmem device!");
-                free(domains);
-                goto error;
-            }
-
-            assert(vec_voidp_push_back(&running_domains, info));
-        }
-        free(domains);
-    }
 
     // libvirt event loop
     for(;;) {
