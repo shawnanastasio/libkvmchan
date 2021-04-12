@@ -61,7 +61,10 @@ struct thread_loop_data {
     void *param;
 };
 
+#ifndef GUEST_ONLY
 static void host_main(void);
+#endif
+
 static void guest_main(void);
 
 /// Helper functions
@@ -243,10 +246,16 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
 
     // Start daemon
-    if (guest)
+    if (guest) {
         guest_main();
-    else
+    } else {
+#ifndef GUEST_ONLY
         host_main();
+#else
+        log(LOGL_ERROR, "kvmchand was built in guest-only mode. You must pass -g.");
+        return EXIT_FAILURE;
+#endif
+    }
 
     /*NOTREACHED*/
     return EXIT_FAILURE;
@@ -263,6 +272,7 @@ static void handle_message(struct ipc_message *msg) {
     };
 
     switch(cmd->command) {
+#ifndef GUEST_ONLY
         case MAIN_IPC_CMD_VCHAN_INIT:
             response.resp.error = !vchan_init((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
                                            (uint32_t)cmd->args[2], (uint64_t)cmd->args[3],
@@ -330,7 +340,7 @@ static void handle_message(struct ipc_message *msg) {
                                             (uint32_t)cmd->args[2]);
             response.resp.error = response.resp.ret != CONNECTIONS_ERROR_NONE;
             break;
-
+#endif
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }
@@ -385,6 +395,7 @@ static void handle_message(struct ipc_message *msg) {
         p; \
     })
 
+#ifndef GUEST_ONLY
 // Entry point for daemon when run in host mode
 static void host_main(void) {
     // Spawn processes for libvirt and ivshmem event loops.
@@ -441,6 +452,7 @@ fail_errno:
     log(LOGL_ERROR, "Error encountered while initializing daemon: %m");
     bail_out();
 }
+#endif
 
 // Entry point for daemon when run in guest mode
 static void guest_main(void) {

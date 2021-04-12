@@ -9,20 +9,32 @@ DEBUG ?= 1
 SYSTEMD ?= 0
 USE_ASAN ?= 0
 USE_PRIVSEP ?= 1
+GUEST_ONLY ?= 0
 
 # Build-time behavior configuration
 PRIVSEP_USER ?= kvmchand
 PRIVSEP_GROUP ?= kvmchand
 
-DAEMON_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
+DAEMON_ALL_SRCS:=daemon/daemon.c daemon/libvirt.c daemon/util.c daemon/ivshmem.c daemon/vfio.c \
 	daemon/ipc.c daemon/connections.c daemon/localhandler.c daemon/page_allocator.c ringbuf.c
-DAEMON_DEPS:=$(DAEMON_SRCS:.c=.daemon.o)
+DAEMON_GUEST_SRCS:=daemon/daemon.c daemon/util.c daemon/vfio.c daemon/ipc.c daemon/localhandler.c \
+	ringbuf.c
 DAEMON_BIN:=kvmchand
-DAEMON_LIBS:=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu libxml-2.0)
-DAEMON_CFLAGS:=$(shell pkg-config --cflags libxml-2.0)
+DAEMON_CFLAGS:=
+DAEMON_LIBS:=
+
 ifeq ($(SYSTEMD),1)
 DAEMON_CFLAGS += -DHAVE_SYSTEMD
 DAEMON_LIBS += `pkg-config --libs libsystemd || pkg-config --libs libsystemd-daemon`
+endif
+
+ifeq ($(GUEST_ONLY),1)
+DAEMON_CFLAGS += -DGUEST_ONLY
+DAEMON_DEPS:=$(DAEMON_GUEST_SRCS:.c=.daemon.o)
+else
+DAEMON_LIBS +=-lrt -pthread $(shell pkg-config --libs libvirt libvirt-qemu)
+DAEMON_CFLAGS +=$(shell pkg-config --cflags libvirt libvirt-qemu)
+DAEMON_DEPS:=$(DAEMON_ALL_SRCS:.c=.daemon.o)
 endif
 
 ifeq ($(USE_PRIVSEP),1)
