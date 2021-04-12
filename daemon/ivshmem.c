@@ -991,7 +991,7 @@ void run_ivshmem_loop(int mainsoc) {
     ASSERT(!pthread_mutex_init(&g_init_status.mutex, NULL));
 
     // Drop root privileges
-    if (!drop_privileges()) {
+    if (!drop_privileges(true)) {
         log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto error;
     }

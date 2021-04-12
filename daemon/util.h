@@ -170,6 +170,16 @@ bool str_is_number(const char *str);
     } \
 } while (0)
 
+// Address sanitizer's prctl function seems broken. Until this can be
+// investigated further, just invoke the syscall directly when asan is enaabled.
+#ifdef __SANITIZE_ADDRESS__
+#include <asm/unistd.h>
+#include <sys/syscall.h>
+#define prctl_w(...) syscall(__NR_prctl, __VA_ARGS__)
+#else
+#define prctl_w(...) prctl(__VA_ARGS__)
+#endif
+
 int add_epoll_fd(int epoll_fd, int fd, int event);
 int del_epoll_fd(int epoll_fd, int fd);
 
@@ -187,6 +197,6 @@ ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out);
 
 uid_t get_uid_for_username(const char *username);
 uid_t get_gid_for_groupname(const char *groupname);
-bool drop_privileges(void);
+bool drop_privileges(bool child);
 
 #endif // KVMCHAND_UTIL_H

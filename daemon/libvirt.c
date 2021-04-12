@@ -698,7 +698,7 @@ void run_libvirt_loop(int mainsoc, const char *host_uri) {
     }
 
     // Drop root privileges
-    if (!drop_privileges()) {
+    if (!drop_privileges(true)) {
         log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto error;
     }

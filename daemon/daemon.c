@@ -351,16 +351,6 @@ static void handle_message(struct ipc_message *msg) {
     }
 }
 
-// Address sanitizer's prctl function seems broken. Until this can be
-// investigated further, just invoke the syscall directly when asan is enaabled.
-#ifdef __SANITIZE_ADDRESS__
-#include <asm/unistd.h>
-#include <sys/syscall.h>
-#define prctl_w(...) syscall(__NR_prctl, __VA_ARGS__)
-#else
-#define prctl_w(...) prctl(__VA_ARGS__)
-#endif
-
 /**
  * Fork a child process and run its main loop.
  *
@@ -429,7 +419,7 @@ static void host_main(void) {
         goto fail_errno;
 
     // Drop root privileges
-    if (!drop_privileges()) {
+    if (!drop_privileges(false)) {
         log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto fail_errno;
     }
@@ -476,7 +466,7 @@ static void guest_main(void) {
         goto fail_errno;
 
     // Drop root privileges
-    if (!drop_privileges()) {
+    if (!drop_privileges(false)) {
         log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto fail_errno;
     }

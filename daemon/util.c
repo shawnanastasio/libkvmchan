@@ -25,10 +25,12 @@
 #include <ctype.h>
 
 #include <unistd.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/prctl.h>
 
 #ifdef USE_PRIVSEP
 #include <pwd.h>
@@ -495,8 +497,9 @@ out:
 }
 #endif
 
-bool drop_privileges(void) {
+bool drop_privileges(bool child) {
 #ifdef USE_PRIVSEP
+
 #if !defined(PRIVSEP_USER) || !defined(PRIVSEP_GROUP)
 #error "Built with USE_PRIVSEP but no PRIVSEP_USER/PRIVSEP_GROUP was defined!"
 #endif
@@ -519,14 +522,20 @@ bool drop_privileges(void) {
         return false;
     }
 
-    return true;
+    if (child) {
+        // setuid() causes PR_SET_PDEATHSIG to be reset, so we have to do it again after dropping privileges.
+        // https://stackoverflow.com/questions/45139073/detect-death-of-parent-process-from-setuid-process
+        prctl_w(PR_SET_PDEATHSIG, SIGHUP, 0, 0, 0);
+    }
 
+    return true;
 #else
 
 #ifndef KVMCHAN_LIBRARY
 #warning "Building without privilege separation - kvmchand will run as root at all times!"
 #endif
-    return true;
 
+    (void)child;
+    return true;
 #endif
 }

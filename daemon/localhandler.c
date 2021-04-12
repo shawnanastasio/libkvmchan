@@ -842,7 +842,7 @@ void run_localhandler_loop(int mainsoc, bool is_dom0) {
     g_is_dom0 = is_dom0;
 
     // Drop root privileges
-    if (!drop_privileges()) {
+    if (!drop_privileges(true)) {
         log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
         goto error;
     }
