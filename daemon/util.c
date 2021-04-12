@@ -446,7 +446,7 @@ bool eventfd_sem_wait_or(int evfd, int other) {
 }
 
 #ifdef USE_PRIVSEP
-static uid_t get_uid_for_username(const char *username) {
+uid_t get_uid_for_username(const char *username) {
     uid_t ret = (uid_t)-1;
 
     long getpw_max = sysconf(_SC_GETPW_R_SIZE_MAX);
@@ -470,7 +470,7 @@ out:
     return ret;
 }
 
-static gid_t get_gid_for_groupname(const char *groupname) {
+gid_t get_gid_for_groupname(const char *groupname) {
     gid_t ret = (gid_t)-1;
 
     long getgr_max = sysconf(_SC_GETGR_R_SIZE_MAX);

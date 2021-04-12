@@ -185,6 +185,8 @@ __attribute__((noreturn)) void bail_out(void);
 ssize_t socmsg_send(int socfd, void *data, size_t len, int fd);
 ssize_t socmsg_recv(int socfd, void *buf, size_t len, int *fd_out);
 
+uid_t get_uid_for_username(const char *username);
+uid_t get_gid_for_groupname(const char *groupname);
 bool drop_privileges(void);
 
 #endif // KVMCHAND_UTIL_H

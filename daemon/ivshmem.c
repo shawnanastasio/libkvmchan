@@ -990,6 +990,12 @@ void run_ivshmem_loop(int mainsoc) {
     ASSERT(!pthread_cond_init(&g_init_status.cond, NULL));
     ASSERT(!pthread_mutex_init(&g_init_status.mutex, NULL));
 
+    // Drop root privileges
+    if (!drop_privileges()) {
+        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
+        goto error;
+    }
+
     if (!ipc_start(mainsoc, IPC_DEST_IVSHMEM, handle_ipc_message))
         goto error;
 
@@ -1006,12 +1012,6 @@ void run_ivshmem_loop(int mainsoc) {
     // Set proper permissions on the socket
     if (chmod(IVSHMEM_SOCK_PATH, 0666) < 0)
         goto error;
-
-    // Drop root privileges
-    if (!drop_privileges()) {
-        log(LOGL_ERROR, "Failed to drop root privileges but built with USE_PRIVSEP=1! Bailing out.");
-        goto error;
-    }
 
     // Install exit handler to remove socket
     if (!install_exit_callback(cleanup_socket_path, (void *)IVSHMEM_SOCK_PATH))

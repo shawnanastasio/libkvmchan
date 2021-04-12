@@ -74,7 +74,7 @@ static bool validate_runtime_dir(void) {
             if (mkdir(RUNTIME_BASE_DIR, 0755) < 0)
                 goto error;
 
-            return true;
+            goto privsep_set_owner;
         } else
             goto error;
     }
@@ -90,6 +90,23 @@ static bool validate_runtime_dir(void) {
         if (chmod(RUNTIME_BASE_DIR, 0755) < 0)
             goto error;
     }
+
+    // Finally, if privsep is enabled, set the owner uid/gid of the dir accordingly
+privsep_set_owner:
+#ifdef USE_PRIVSEP
+    {
+        uid_t kvmchand_uid = get_uid_for_username(PRIVSEP_USER);
+        if (kvmchand_uid == (uid_t)-1)
+            goto error;
+        gid_t kvmchand_gid = get_gid_for_groupname(PRIVSEP_GROUP);
+        if (kvmchand_gid == (gid_t)-1)
+            goto error;
+
+        if (s.st_uid != kvmchand_uid || s.st_gid != kvmchand_gid)
+            if (chown(RUNTIME_BASE_DIR, kvmchand_uid, kvmchand_gid) < 0)
+                goto error;
+    }
+#endif
 
     return true;
 
