@@ -341,25 +341,31 @@ static pid_t get_domain_pid(uint32_t dom) {
 
 /**
  * Zero out a memfd's memory region so that it can be re-used for a new vchan
+ * @param memfd  memfd with memory to clear
+ * @param start  start offset in memfd, must be page-aligned
+ * @param size   size of memory to clear, or 0 for everything
  */
-static bool clear_memfd_for_reuse(int memfd) {
+static bool clear_memfd_region_for_reuse(int memfd, size_t start, size_t size) {
     bool res = false;
 
-    struct stat statbuf;
-    if (fstat(memfd, &statbuf) < 0)
-        goto out;
-    if (statbuf.st_size == 0)
-        goto out;
+    if (!size) {
+        struct stat statbuf;
+        if (fstat(memfd, &statbuf) < 0)
+            goto out;
+        if (statbuf.st_size == 0)
+            goto out;
+        size = statbuf.st_size;
+    }
 
-    void *region = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, memfd, 0);
+    void *region = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, start);
     if (region == (void *)-1)
         goto out;
 
     // Use explicit_bzero to clear the shared memory region.
     // This should guarantee that we don't get optimized away.
-    explicit_bzero(region, statbuf.st_size);
+    explicit_bzero(region, size);
 
-    if (munmap(region, statbuf.st_size) < 0)
+    if (munmap(region, size) < 0)
         goto out;
 
     res = true;
@@ -527,7 +533,7 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
                 existing->vchan.port, port);
 
         // Clear the data
-        if (!clear_memfd_for_reuse(existing->memfd)) {
+        if (!clear_memfd_region_for_reuse(existing->memfd, 0, 0)) {
             // Failed to securely wipe the old connection's shared memory region,
             // mark the connection as unusable and fail
             log(LOGL_WARN, "Marking old connection (server dom %"PRIu32
