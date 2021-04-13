@@ -939,10 +939,15 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
     // Find or create a suitable connection between the two domains
     struct connection *conn;
     size_t region_start_offset;
-    if (!allocate_shmem_region(server, client, page_size * page_count, region_id, &conn, &region_start_offset)) {
+    size_t region_size = page_size * page_count;
+    if (!allocate_shmem_region(server, client, region_size, region_id, &conn, &region_start_offset)) {
         log(LOGL_WARN, "Failed to allocate shmem pages");
         return CONNECTIONS_ERROR_ALLOC_FAIL;
     }
+
+    // Zero out allocated region
+    if (!clear_memfd_region_for_reuse(conn->memfd, region_start_offset, region_size))
+        log(LOGL_WARN, "Failed to clear allocated shared memory region: %m. Continuing...");
 
     // The server dom from the connection's perspective may be different from the server for this particular region,
     // so we need to make sure they match up when returning ivpositions.
