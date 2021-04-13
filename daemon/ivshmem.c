@@ -525,7 +525,70 @@ static bool handle_kvmchand_message(struct client_info *client, struct conn_info
                     .args = {
                         dom,
                         msg.args[0],
-                        msg.args[1]
+                        msg.args[1],
+                        true
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_SHMEM_CONN:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_SHMEM_CONN,
+                    .args = {
+                        msg.args[0],
+                        dom,
+                        msg.args[1],
+                        msg.args[2],
+                        false
+                    },
+                },
+                .dest = IPC_DEST_MAIN,
+                .flags = IPC_FLAG_WANTRESP
+            };
+
+            if (!ipc_send_message(&ipc_msg, &ipc_resp))
+                break;
+
+            ret.error = ipc_resp.resp.error;
+            if (ret.error)
+                break;
+
+            uint32_t ivposition = ipc_resp.resp.ret & 0xFFFFFFFF;
+            uint32_t page_count = (ipc_resp.resp.ret >> 32) & 0xFFFFFFFF;
+            size_t start_off = ipc_resp.resp.ret2;
+
+            ret.ret = ((uint64_t)page_count << 32) | ivposition;
+            ret.ret2 = start_off;
+
+            break;
+        }
+
+        case KVMCHAND_CMD_SHMEM_CLIENT_DISCONNECT:
+        {
+            uint32_t dom = client_get_domain(client);
+            struct ipc_message ipc_resp, ipc_msg = {
+                .type = IPC_TYPE_CMD,
+                .cmd = {
+                    .command = MAIN_IPC_CMD_SHMEM_CLOSE,
+                    .args = {
+                        msg.args[0],
+                        dom,
+                        msg.args[1],
+                        false
                     },
                 },
                 .dest = IPC_DEST_MAIN,

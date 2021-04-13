@@ -150,7 +150,7 @@ struct ipc_message {
  * args[0] - (u32) domain # of server
  * args[1] - (u32) domain # of client
  * args[2] - (u32) server page size
- * args[3] - (size_t) number of pages to allocate
+ * args[3] - (u32) number of pages to allocate
  * args[4] - (bool) return memfd?
  *
  * resp.error - error?
@@ -167,12 +167,29 @@ struct ipc_message {
  * args[0] - (u32) server_dom
  * args[1] - (u32) client_dom
  * args[2] - (u32) region_id
+ * args[3] - (bool) is_server
  *
  * resp.error - error?
  * resp.ret   - `enum connections_error` code.
  */
 #define MAIN_IPC_CMD_SHMEM_CLOSE 7
 
+/**
+ * Connect to an existing shared memory mapping.
+ * args[0] - (u32) domain # of server
+ * args[1] - (u32) domain # of client
+ * args[2] - (u32) region id
+ * args[3] - (u32) client page size
+ * args[4] - (bool) return memfd?
+ *
+ * resp.error  - error?
+ * resp.ret (lower 32 bits) - (u32) On success, client's IVPosition (if remote), else server's IVPosition
+ *                                  On failure, `enum connections_error` code
+ * resp.ret (upper 32 bits) - (u32) Number of pages in this region
+ * resp.ret2   - (size_t) Offset into memfd/ivshmem_bar2 where this mapping starts
+ * resp.fds[0] - memfd for region (only if args[4]==true)
+ */
+#define MAIN_IPC_CMD_SHMEM_CONN 8
 
 // libvirt process commands
 

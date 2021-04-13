@@ -317,7 +317,7 @@ static void handle_message(struct ipc_message *msg) {
             size_t start_off;
             int memfd = -1;
             enum connections_error ret = shmem_create((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2],
-                                                      (size_t)cmd->args[3], (bool)cmd->args[4], &ivposition, &region_id, &start_off,
+                                                      (uint32_t)cmd->args[3], (bool)cmd->args[4], &ivposition, &region_id, &start_off,
                                                       &memfd);
 
             response.resp.error = ret != CONNECTIONS_ERROR_NONE;
@@ -337,9 +337,33 @@ static void handle_message(struct ipc_message *msg) {
 
         case MAIN_IPC_CMD_SHMEM_CLOSE:
             response.resp.ret = shmem_close((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
-                                            (uint32_t)cmd->args[2]);
+                                            (uint32_t)cmd->args[2], (bool)cmd->args[3]);
             response.resp.error = response.resp.ret != CONNECTIONS_ERROR_NONE;
             break;
+
+        case MAIN_IPC_CMD_SHMEM_CONN:
+        {
+            uint32_t ivposition;
+            size_t start_off;
+            uint32_t page_count;
+            int memfd = -1;
+            enum connections_error ret = shmem_conn((uint32_t)cmd->args[0], (uint32_t)cmd->args[1], (uint32_t)cmd->args[2],
+                                                    (uint32_t)cmd->args[3], (bool)cmd->args[4], &ivposition, &start_off, &page_count, &memfd);
+            response.resp.error = ret != CONNECTIONS_ERROR_NONE;
+            if (response.resp.error) {
+                response.resp.ret = ret;
+            } else {
+                response.resp.ret = ((uint64_t)page_count << 32) | ivposition;
+                response.resp.ret2 = start_off;
+                if (memfd > 0) {
+                    response.flags = IPC_FLAG_FD;
+                    response.fd_count = 1;
+                    response.fds[0] = memfd;
+                }
+            }
+            break;
+        }
+
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }

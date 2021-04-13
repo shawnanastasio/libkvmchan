@@ -130,9 +130,9 @@ struct kvmchand_message {
 #define KVMCHAND_CMD_GET_STATE_SERVER 7
 
     /**
-     * Create an shmem region for sharing with a given client dom
+     * Create an shmem region for sharing with a given client dom.
      * args[0] - (u32)    domain # of client
-     * args[1] - (uint32) local page size (overridden by localhandler)
+     * args[1] - (u32)    local page size (overridden by localhandler)
      * args[2] - (size_t) page count
      *
      * Note: In some cases it may not be possible to immediately return
@@ -148,11 +148,31 @@ struct kvmchand_message {
 #define KVMCHAND_CMD_SHMEM_CREATE 8
 
     /**
-     * Close an existing shmem region.
+     * Close an existing shmem region (server).
      * args[0] - (u32) domain # of client
      * args[1] - (u32) region id
      */
 #define KVMCHAND_CMD_SHMEM_CLOSE 9
+
+    /**
+     * Connect to an existing shmem region.
+     * args[0] - (u32) domain # of server
+     * args[1] - (u32) region id
+     * args[2] - (u32) local page size (overriden by localhandler)
+     *
+     * ret - (u32) ivposition_or_0
+     * ret2 - (size_t) start_offset
+     * fd_count - 1
+     * fds - backing shmfd
+     */
+#define KVMCHAND_CMD_SHMEM_CONN 10
+
+    /**
+     * Close a previously opened shmem region (client).
+     * args[0] - (u32) domain # of server
+     * args[1] - (u32) region id
+     */
+#define KVMCHAND_CMD_SHMEM_CLIENT_DISCONNECT 11
 
     int64_t args[KVMCHAND_MSG_NUM_ARGS];
 };

@@ -32,6 +32,11 @@
 
 #define __maybe_unused __attribute__((unused))
 
+// container_of macro shamelessly stolen from linux
+#define container_of(ptr, type, member) ({                      \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)( (char *)__mptr - offsetof(type,member) );})
+
 // Old glibc doesn't have <sys/memfd.h>, just declare memfd_create manually
 #if __has_include(<sys/memfd.h>)
 #include <sys/memfd.h>

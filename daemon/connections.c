@@ -57,8 +57,6 @@ struct connection {
     uint32_t server_ivposition; // IVPosition if guest, or 0
     struct domain *client;
     uint32_t client_ivposition; // IVPosition if guest, or 0
-    bool server_connected;
-    bool client_connected;
 
     int memfd;       // memfd backing shared memory region
     size_t size;     // Size of the memfd's storage
@@ -75,6 +73,8 @@ struct connection {
             uint32_t port;
             uint64_t read_min;
             uint64_t write_min;
+            bool server_connected;
+            bool client_connected;
         } vchan;
 
         struct {
@@ -89,7 +89,8 @@ struct shmem_region_tag {
     struct domain *server;
     uint32_t client_dom;
     uint32_t id;
-    int state; // CONNECTION_STATE_*
+    bool server_connected;
+    bool client_connected;
 
     // Allocation chunk this region was assigned to
     struct allocation_chunk *parent_chunk;
@@ -492,6 +493,7 @@ fail:
 
 /**
  * Inititalize a new vchan between two domains.
+ *
  * @param server_dom            Domain number of server
  * @param client_dom            Domain number of client
  * @param port                  Port number
@@ -545,8 +547,8 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
 
         existing->vchan.port = port;
         existing->vchan.state = CONNECTION_STATE_WAITING;
-        existing->server_connected = true;
-        existing->client_connected = false;
+        existing->vchan.server_connected = true;
+        existing->vchan.client_connected = false;
 
         // Sometimes we may be re-using a connection with swapped server/client domains, so
         // swap them again to match this connection.
@@ -598,8 +600,8 @@ bool vchan_init(uint32_t server_dom, uint32_t client_dom, uint32_t port,
     conn_p->server_ivposition = server_ivposition;
     conn_p->client = client;
     conn_p->client_ivposition = client_ivposition;
-    conn_p->server_connected = true;
-    conn_p->client_connected = false;
+    conn_p->vchan.server_connected = true;
+    conn_p->vchan.client_connected = false;
     conn_p->type = CONNECTION_TYPE_VCHAN;
     conn_p->memfd = memfd;
     conn_p->size = real_size;
@@ -655,7 +657,7 @@ enum connections_error vchan_conn(uint32_t server_dom, uint32_t client_dom, uint
         *pid_out = conn->client->pid;
     }
 
-    conn->client_connected = true;
+    conn->vchan.client_connected = true;
     conn->vchan.state = CONNECTION_STATE_CONNECTED;
 
     return CONNECTIONS_ERROR_NONE;
@@ -685,13 +687,13 @@ bool vchan_close(uint32_t server_dom, uint32_t client_dom, uint32_t port) {
         return false;
     }
 
-    conn->server_connected = false;
+    conn->vchan.server_connected = false;
     conn->vchan.state = CONNECTION_STATE_DISCONNECTED;
 
     // If both ends are disconnected, mark the connection as free so that it can be reused.
     // This means that vchans are only truly destroyed when a guest involved shuts down
     // which is fine for now, but may need to be changed eventually.
-    if (!conn->client_connected) {
+    if (!conn->vchan.client_connected) {
         log(LOGL_INFO, "vchan_close: vchan now marked as free");
         conn->vchan.state = CONNECTION_STATE_FREE;
     }
@@ -724,20 +726,20 @@ enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t cli
     if (!conn || !vchan_conn_is_in_use(conn))
         return CONNECTIONS_ERROR_NOT_FOUND;
 
-    if (!conn->client_connected) {
+    if (!conn->vchan.client_connected) {
         log(LOGL_WARN, "Client tried to disconnect from a vchan they weren't connected to at"
                        " server dom %"PRIu32", client dom %"PRIu32", port %"PRIu32,
             server_dom, client_dom, port);
         return CONNECTIONS_ERROR_INVALID_OP;
     }
 
-    conn->client_connected = false;
+    conn->vchan.client_connected = false;
     conn->vchan.state = CONNECTION_STATE_DISCONNECTED;
 
     // If both ends are disconnected, mark the connection as free so that it can be reused.
     // This means that vchans are only truly destroyed when a guest involved shuts down
     // which is fine for now, but may need to be changed eventually.
-    if (!conn->server_connected) {
+    if (!conn->vchan.server_connected) {
         log(LOGL_INFO, "vchan_client_disconnect: vchan now marked as free");
         conn->vchan.state = CONNECTION_STATE_FREE;
     }
@@ -780,7 +782,8 @@ static struct shmem_region_tag *shmem_region_tag_new(struct domain *server, uint
     tag->server = server;
     tag->client_dom = client_dom;
     tag->id = id;
-    tag->state = CONNECTION_STATE_WAITING;
+    tag->server_connected = true;
+    tag->client_connected = false;
     tag->parent_chunk = NULL;
 
     // Store the allocation in the server domain's list
@@ -849,8 +852,6 @@ static bool allocate_shmem_region(struct domain *server, struct domain *client, 
     conn_p->server_ivposition = server_ivposition;
     conn_p->client = client;
     conn_p->client_ivposition = client_ivposition;
-    conn_p->server_connected = true;
-    conn_p->client_connected = false;
     conn_p->type = CONNECTION_TYPE_SHMEM;
     conn_p->memfd = memfd;
     conn_p->size = real_size;
@@ -873,6 +874,30 @@ fail_tag:
     return false;
 }
 
+static bool validate_and_update_page_size(struct domain *dom, uint32_t page_size) {
+    // If domain already has a known page size, make sure it is consistent
+    if (dom->page_size) {
+        if (dom->page_size != page_size) {
+            log(LOGL_WARN, "Domain %"PRIu32" changed its page size from %"PRIu32" to %"PRIu32
+                    ". The new page size will not be accepted until the domain is shut down.",
+                    dom->dom, dom->page_size, page_size);
+            return false;
+        }
+
+        return true;
+    }
+
+    // Otherwise, validate the provided page size and store it
+    for (size_t i = 0; i < ARRAY_SIZE(valid_page_sizes); i++)
+        if (valid_page_sizes[i] == page_size)
+            goto valid_page_size;
+    return false;
+
+valid_page_size:
+    dom->page_size = page_size;
+    return true;
+}
+
 /**
  * Create a shared memory region between domains, using an existing connection if possible,
  * or creating a new one otherwise.
@@ -886,12 +911,12 @@ fail_tag:
  * @param[out] region_id_out    ID of newly created shmem region
  * @param[out] start_off_out    Offset into memfd/ivshmem_bar2 where the allocated pages start
  * @param[out] memfd_out        File descriptor for shared memory region (only if include_memfd)
- * @return                      IVPosition of server, or 0 on failure
+ * @return                      return code
  */
-enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, size_t page_count,
+enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, uint32_t page_count,
                                     bool include_memfd, uint32_t *ivpos_out, uint32_t *region_id_out, size_t *start_off_out,
                                     int *memfd_out) {
-    log(LOGL_INFO, "shmem_create called! server_dom: %"PRIu32", client_dom %"PRIu32", page_count: %"PRIu64
+    log(LOGL_INFO, "shmem_create called! server_dom: %"PRIu32", client_dom %"PRIu32", page_count: %"PRIu32
                    ", page_size: %"PRIu32, server_dom, client_dom, page_count, page_size);
 
     if (server_dom == client_dom)
@@ -901,29 +926,15 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
     if (page_count > MAX_PAGE_COUNT)
         return CONNECTIONS_ERROR_INVALID_OP;
 
-    bool valid_page_size = false;
-    for (size_t i = 0; i < ARRAY_SIZE(valid_page_sizes); i++)
-        if (valid_page_sizes[i] == page_size)
-            valid_page_size = true;
-    if (!valid_page_size)
-        return CONNECTIONS_ERROR_INVALID_OP;
-
     struct domain *server = connections_get_dom_or_create_new(server_dom);
     struct domain *client = connections_get_dom_or_create_new(client_dom);
     if (!server || !client)
         return CONNECTIONS_ERROR_DOM_OFFLINE;
 
-    if (server->page_size == 0) {
-        server->page_size = page_size;
-    } else if (server->page_size != page_size) {
-        // Server changed page size - we choose not to support this
-        log(LOGL_WARN, "Domain %"PRIu32" changed its page size from %"PRIu32" to %"PRIu32
-                ". The new page size will not be accepted until the domain is shut down.",
-                server_dom, server->page_size, page_size);
+    if (!validate_and_update_page_size(server, page_size))
         return CONNECTIONS_ERROR_INVALID_OP;
-    }
 
-    if (client->page_size != 0 && client->page_size != page_size) {
+    if (client->page_size && client->page_size != page_size) {
         log(LOGL_INFO, "Rejecting shmem creation between domains with differing page sizes (%"PRIu32" vs %"PRIu32")",
                 page_size, client->page_size);
         return CONNECTIONS_ERROR_INVALID_OP;
@@ -969,9 +980,9 @@ enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, ui
 /**
  * Close an existing shared memory mapping
  */
-enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uint32_t region_id) {
-    log(LOGL_INFO, "shmem_close called! server_dom: %"PRIu32", client_dom %"PRIu32", region_id: %"PRIu32,
-            server_dom, client_dom, region_id);
+enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uint32_t region_id, bool is_server) {
+    log(LOGL_INFO, "shmem_close called by %s! server_dom: %"PRIu32", client_dom %"PRIu32", region_id: %"PRIu32,
+            is_server ? "server" : "client", server_dom, client_dom, region_id);
 
     struct domain *server = connections_get_dom_or_create_new(server_dom);
     if (!server) {
@@ -986,11 +997,107 @@ enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uin
                 server_dom, client_dom, region_id);
         return CONNECTIONS_ERROR_NOT_FOUND;
     }
+    struct shmem_region_tag *tag = *tag_p;
 
-    // Obtain the page allocator this shmem region was allocated with and free the chunk
-    struct allocation_chunk *chunk = (*tag_p)->parent_chunk;
+    if (is_server) {
+        if (!tag->server_connected) {
+            log(LOGL_WARN, "Server tried to close already-closed shmem region. server_dom=%"PRIu32", client_dom=%"PRIu32", region_id=%"PRIu32,
+                    server_dom, client_dom, region_id);
+            return CONNECTIONS_ERROR_INVALID_OP;
+        }
+        tag->server_connected = false;
+    } else {
+        if (!tag->client_connected) {
+            log(LOGL_WARN, "Client tried to close already-closed shmem region. server_dom=%"PRIu32", client_dom=%"PRIu32", region_id=%"PRIu32,
+                    server_dom, client_dom, region_id);
+            return CONNECTIONS_ERROR_INVALID_OP;
+        }
+        tag->client_connected = false;
+    }
+
+    if (!tag->server_connected && !tag->client_connected) {
+        // Obtain the page allocator this shmem region was allocated with and free the chunk
+        struct allocation_chunk *chunk = tag->parent_chunk;
+        struct page_allocator *allocator = page_allocator_get_parent_from_chunk(chunk);
+        page_allocator_free(allocator, chunk);
+    }
+
+    return CONNECTIONS_ERROR_NONE;
+}
+
+/**
+ * Connect to an existing shared memory region.
+ *
+ * @param server_dom           Domain number of server
+ * @param client_dom           Domain number of client
+ * @param region_id            ID of region to connect to
+ * @param page_size            Page size of requesting domain
+ * @param include_memfd        Include file descriptor for shared memory region?
+ * @param[out] ivposition_out  IVPosition for client, or server if client is dom0
+ * @param[out] start_off_out   Offset into memfd/ivshmem_bar2 where the allocated pages start
+ * @param[out] page_count_out  Number of shared pages in this region
+ * @param[out] memfd_out       File descriptor for shared memory region (only if include_memfd)
+ * @return                     return code
+ */
+enum connections_error shmem_conn(uint32_t server_dom, uint32_t client_dom, uint32_t region_id, uint32_t page_size,
+                                  bool include_memfd, uint32_t *ivpos_out, size_t *start_off_out, uint32_t *page_count_out,
+                                  int *memfd_out) {
+    log(LOGL_INFO, "shmem_conn called! server_dom: %"PRIu32", client_dom %"PRIu32", page_size: %"PRIu32
+                   ", region_id: %"PRIu32, server_dom, client_dom, page_size, region_id);
+
+    if (server_dom == client_dom)
+        return CONNECTIONS_ERROR_INVALID_OP;
+
+    struct domain *server = connections_get_dom_or_create_new(server_dom);
+    struct domain *client = connections_get_dom_or_create_new(client_dom);
+    if (!server || !client)
+        return CONNECTIONS_ERROR_DOM_OFFLINE;
+
+    if (!validate_and_update_page_size(client, page_size))
+        return CONNECTIONS_ERROR_INVALID_OP;
+
+    if (client->page_size != server->page_size) {
+        log(LOGL_INFO, "Rejecting shmem connection between domains with differing page sizes (server=%"PRIu32", client=%"PRIu32")",
+                server->page_size, client->page_size);
+        return CONNECTIONS_ERROR_INVALID_OP;
+    }
+
+    struct shmem_region_tag **tag_p = dom_get_shmem_region_tag_by_id(server, client->dom, region_id);
+    if (!tag_p) {
+        log(LOGL_INFO, "Tried to connect to non-existent shmem region at server_dom=%"PRIu32", client_dom=%"PRIu32
+                       ", region_id=%"PRIu32, server_dom, client_dom, region_id);
+        return CONNECTIONS_ERROR_NOT_FOUND;
+    }
+
+    struct shmem_region_tag *tag = *tag_p;
+
+    if (tag->client_connected) {
+        log(LOGL_INFO, "Tried to connect to already-opened shmem region at server_dom=%"PRIu32", client_dom=%"PRIu32
+                       ", region_id=%"PRIu32, server_dom, client_dom, region_id);
+        return CONNECTIONS_ERROR_INVALID_OP;
+    }
+
+    // Obtain pointers to the shmem tag's parent allocation chunk and connection
+    struct allocation_chunk *chunk = tag->parent_chunk;
     struct page_allocator *allocator = page_allocator_get_parent_from_chunk(chunk);
-    page_allocator_free(allocator, chunk);
+    struct connection *conn = container_of(allocator, struct connection, shmem.allocator);
+
+    // The server dom from the connection's perspective may be different from the server for this particular region,
+    // so we need to make sure they match up when returning ivpositions.
+    uint32_t server_ivposition = (server == conn->server) ? conn->server_ivposition : conn->client_ivposition;
+    uint32_t client_ivposition = (client == conn->client) ? conn->client_ivposition : conn->server_ivposition;
+
+    // Mark this region with client_connected=true and return information
+    tag->client_connected = true;
+
+    *ivpos_out = (client_dom > 0) ? client_ivposition : server_ivposition;
+    *start_off_out = chunk->start_offset;
+    if (include_memfd)
+        *memfd_out = conn->memfd;
+    *page_count_out = chunk->length / page_size;
+
+    log(LOGL_INFO, "shmem_conn successfully opened region. ivpos=%"PRIu32", start=%zu, page_count=%"PRIu32,
+            *ivpos_out, *start_off_out, *page_count_out);
 
     return CONNECTIONS_ERROR_NONE;
 }

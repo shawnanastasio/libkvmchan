@@ -47,9 +47,13 @@ bool vchan_unregister_domain(pid_t pid);
 enum connections_error vchan_client_disconnect(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 int vchan_get_state(uint32_t server_dom, uint32_t client_dom, uint32_t port);
 
-enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, size_t page_count,
+enum connections_error shmem_create(uint32_t server_dom, uint32_t client_dom, uint32_t page_size, uint32_t page_count,
                                     bool include_memfd, uint32_t *ivpos_out, uint32_t *region_id_out, size_t *start_off_out,
                                     int *memfd_out);
-enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uint32_t region_id);
+enum connections_error shmem_close(uint32_t server_dom, uint32_t client_dom, uint32_t region_id, bool is_server);
+enum connections_error shmem_conn(uint32_t server_dom, uint32_t client_dom, uint32_t region_id, uint32_t page_size,
+                                  bool include_memfd, uint32_t *ivpos_out, size_t *start_off_out, uint32_t *page_count_out,
+                                  int *memfd_out);
+
 
 #endif //KVMCHAND_CONNECTIONS_H
