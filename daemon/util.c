@@ -139,7 +139,7 @@ void llist_generic_init(struct llist_generic *l, size_t element_size, void (*des
 }
 
 void *llist_generic_new_at_front(struct llist_generic *l) {
-    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    void *new_block = calloc(1, l->element_size + sizeof(struct llist_footer));
     ASSERT_OR_RETURN_NULL(new_block);
     struct llist_footer *footer = llist_generic_get_footer(l, new_block);
     footer->prev = NULL;
@@ -156,7 +156,7 @@ void *llist_generic_new_at_front(struct llist_generic *l) {
 }
 
 void *llist_generic_new_at_back(struct llist_generic *l) {
-    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    void *new_block = calloc(1, l->element_size + sizeof(struct llist_footer));
     ASSERT_OR_RETURN_NULL(new_block);
     struct llist_footer *footer = llist_generic_get_footer(l, new_block);
     footer->prev = l->last;
@@ -176,7 +176,7 @@ void *llist_generic_new_after(struct llist_generic *l, void *entry) {
     struct llist_footer *entry_footer = llist_generic_get_footer(l, entry);
     ASSERT_OR_RETURN_NULL(entry_footer->parent_list == l);
 
-    void *new_block = malloc(l->element_size + sizeof(struct llist_footer));
+    void *new_block = calloc(1, l->element_size + sizeof(struct llist_footer));
     ASSERT_OR_RETURN_NULL(new_block);
     struct llist_footer *new_footer = llist_generic_get_footer(l, new_block);
 
