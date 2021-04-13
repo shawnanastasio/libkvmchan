@@ -396,6 +396,7 @@ static bool defer_client_message(struct kvmchand_message *msg, struct kvmchand_r
     }
 
     ret->ret = ipc_resp.resp.ret;
+    ret->ret2 = ipc_resp.resp.ret2;
     ret->error = ipc_resp.resp.error;
 
     return true;
