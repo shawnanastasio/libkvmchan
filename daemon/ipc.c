@@ -389,6 +389,8 @@ static void *response_dispatcher_thread(void *rdata_) {
             struct ipc_message *cur = rdata->message_queue.data[0];
 
             // Call message handler
+            if (!rdata->message_handler)
+                log_BUG("Message sent to process with no message_handler registered!");
             rdata->message_handler(cur);
 
             vec_voidp_remove(&rdata->message_queue, 0);

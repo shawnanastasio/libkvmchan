@@ -261,6 +261,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
 }
 
+#ifndef GUEST_ONLY
 static void handle_message(struct ipc_message *msg) {
     struct ipc_cmd *cmd = &msg->cmd;
     struct ipc_message response = {
@@ -272,7 +273,6 @@ static void handle_message(struct ipc_message *msg) {
     };
 
     switch(cmd->command) {
-#ifndef GUEST_ONLY
         case MAIN_IPC_CMD_VCHAN_INIT:
             response.resp.error = !vchan_init((uint32_t)cmd->args[0], (uint32_t)cmd->args[1],
                                            (uint32_t)cmd->args[2], (uint64_t)cmd->args[3],
@@ -340,7 +340,6 @@ static void handle_message(struct ipc_message *msg) {
                                             (uint32_t)cmd->args[2]);
             response.resp.error = response.resp.ret != CONNECTIONS_ERROR_NONE;
             break;
-#endif
         default:
             log_BUG("Unknown IPC command received in main: %"PRIu64, cmd->command);
     }
@@ -350,6 +349,7 @@ static void handle_message(struct ipc_message *msg) {
             log_BUG("Unable to send response to IPC message!");
     }
 }
+#endif
 
 /**
  * Fork a child process and run its main loop.
@@ -479,7 +479,7 @@ static void guest_main(void) {
     sockets[IPC_SOCKET_VFIO] = main_vfio_sv[0];
     sockets[IPC_SOCKET_LOCALHANDLER] = main_localhandler_sv[0];
 
-    ipc_server_start(sockets, handle_message);
+    ipc_server_start(sockets, NULL);
 
 fail_errno:
     log(LOGL_ERROR, "Daemon init failed: %m");
