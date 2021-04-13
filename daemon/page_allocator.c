@@ -100,7 +100,6 @@ size_t page_allocator_allocate(struct page_allocator *priv, size_t size, void *t
 void page_allocator_free(struct page_allocator *priv, struct allocation_chunk *chunk) {
     ASSERT((chunk->flags & ALLOCATION_CHUNK_FLAG_FREE) == 0);
     struct llist_allocation_chunk_footer *chunk_footer = llist_allocation_chunk_get_footer(&priv->chunks, chunk);
-    struct allocation_chunk *original_chunk = chunk;
     chunk->flags |= ALLOCATION_CHUNK_FLAG_FREE;
 
     // Coalesce forward
@@ -127,9 +126,6 @@ void page_allocator_free(struct page_allocator *priv, struct allocation_chunk *c
         chunk = prev;
     }
 
-    if (original_chunk == chunk)
-        // No coalescing took place, just delete the chunk
-        llist_allocation_chunk_remove(&priv->chunks, original_chunk);
 }
 
 struct allocation_chunk *page_allocator_get_chunk_by_tag(struct page_allocator *priv, tag_comparator_t comparator, void *tag) {
