@@ -72,10 +72,13 @@ LIBKVMCHAN_EXPORTED void libkvmchan_shmem_end(struct libkvmchan_shmem *handle);
 /**
  * Allocate memory to share with the provided domain.
  *
+ * On success, returns a pointer to the newly allocated memory as well as an id that
+ * corresponds to the entire allocated region.
+ *
  * @param handle              previously opened `libkvmchan_shmem` handle
  * @param client_dom          domain # to share memory with
- * @param page_count          number of shared pages to allocate
- * @param[out] region_id_out  allocated region ID for new shared memory
+ * @param page_count          number of shared pages to allocate in this region
+ * @param[out] region_id_out  region ID for the entire newly allocated region
  * @return                    pointer to allocated shared memory region, or NULL on failure
  */
 LIBKVMCHAN_EXPORTED void *libkvmchan_shmem_region_create(struct libkvmchan_shmem *handle, uint32_t client_dom,
@@ -93,6 +96,10 @@ LIBKVMCHAN_EXPORTED void *libkvmchan_shmem_region_connect(struct libkvmchan_shme
 
 /**
  * Close a previously opened shared memory region.
+ *
+ * Close and unmap the full shared memory region referred to by the provided pointer.
+ * Only pointers obtained from `libkvmchan_shmem_region_create` or `libkvmchan_shmem_region_connect`
+ * are accepted. Any other values will be rejected.
  *
  * In the case of a server, the region will no longer be mappable by the client domain after close,
  * but existing client mappings will still be open.
