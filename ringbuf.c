@@ -34,6 +34,10 @@
 // The usable space (size of ringbuf - 1)
 #define USABLE(rb) ((rb)->size - 1)
 
+//#include <stdio.h>
+//#define rb_debug(fmt, ...) fprintf(stderr, "rbdbg: "fmt, ##__VA_ARGS__)
+#define rb_debug(fmt, ...)
+
 const char *ringbuf_ret_names[] = {
     "RB_SUCCESS",
     "RB_NOSPACE",
@@ -47,12 +51,12 @@ static inline size_t ringbuf_free_space(ringbuf_t *rb);
 
 /// Notification helpers
 
-static void block_on_eventfd(int eventfd) {
+static bool block_on_eventfd(int eventfd) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(eventfd, &rfds);
     struct timeval timeout = { .tv_sec = 1 };
-    ignore_value(select(eventfd + 1, &rfds, NULL, NULL, &timeout));
+    return select(eventfd + 1, &rfds, NULL, NULL, &timeout) > 0;
 }
 
 static void clear_eventfd(int fd) {
@@ -67,6 +71,8 @@ static void clear_eventfd(int fd) {
 
 static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size,
                                 bool stream_mode, size_t *size_out) {
+    rb_debug("block_read start. size: %zu, avail: %zu, stream: %d\n",
+             size, ringbuf_available(priv), stream_mode);
     int eventfd = priv->incoming_eventfd;
 
     assert(eventfd > 0);
@@ -93,8 +99,12 @@ static ringbuf_ret_t block_read(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size
         }
 
         uint64_t buf;
-        block_on_eventfd(eventfd);
-        ignore_value(read(eventfd, &buf, 8));
+        rb_debug("block_read BLOCK\n");
+        if (block_on_eventfd(eventfd)) {
+            rb_debug("block_read READ\n");
+            ignore_value(read(eventfd, &buf, 8));
+        }
+        rb_debug("block_read LOOP\n");
     }
 
 success:
@@ -105,6 +115,7 @@ success:
 }
 
 static void notify_read(ringbuf_t *priv) {
+    rb_debug("NOTIFY READ\n");
     int eventfd = (priv->direction == RINGBUF_DIRECTION_LOCAL) ?
                     priv->incoming_eventfd : priv->outgoing_eventfd;
 
@@ -117,6 +128,8 @@ static void notify_read(ringbuf_t *priv) {
 
 static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t size,
                                  bool stream_mode, size_t *size_out) {
+    rb_debug("block_write start. size: %zu, free: %zu, stream: %d\n",
+             size, ringbuf_free_space(priv), stream_mode);
     int eventfd = priv->incoming_eventfd;
 
     assert(eventfd > 0);
@@ -139,13 +152,17 @@ static ringbuf_ret_t block_write(ringbuf_t *priv, ringbuf_pub_t *pub, size_t siz
                 size = free_space;
             goto success;
         } else if (!stream_mode && (free_space >= size)) {
-            // Stream mode, wait for >= `size` bytes of free space
+            // Packet mode, wait for >= `size` bytes of free space
             goto success;
         }
 
         uint64_t buf;
-        block_on_eventfd(eventfd);
-        ignore_value(read(eventfd, &buf, 8));
+        rb_debug("block_write BLOCK\n");
+        if (block_on_eventfd(eventfd)) {
+            rb_debug("block_write READ\n");
+            ignore_value(read(eventfd, &buf, 8));
+        }
+        rb_debug("block_write LOOP\n");
     }
 
 success:
@@ -156,6 +173,7 @@ success:
 }
 
 static void notify_write(ringbuf_t *priv) {
+    rb_debug("NOTIFY WRITE\n");
     int eventfd = (priv->direction == RINGBUF_DIRECTION_LOCAL) ?
                     priv->incoming_eventfd : priv->outgoing_eventfd;
 
@@ -287,6 +305,7 @@ ringbuf_ret_t ringbuf_sec_infer_priv(ringbuf_t *priv, ringbuf_pub_t *pub, void *
  */
 static ringbuf_ret_t ringbuf_sec_write_impl(ringbuf_t *priv, ringbuf_pub_t *pub, const void *data, size_t size,
                                      bool stream_mode, size_t *size_out) {
+    rb_debug("sec_write start. size: %zu, free: %zu\n", size, ringbuf_free_space(priv));
     if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
         // Flush pos_start from public struct
         priv->pos_start = pub->pos_start_untrusted;
@@ -328,6 +347,7 @@ static ringbuf_ret_t ringbuf_sec_write_impl(ringbuf_t *priv, ringbuf_pub_t *pub,
     if (size_out)
         *size_out = size;
 
+    rb_debug("sec_write end. size: %zu, free: %zu\n", size, ringbuf_free_space(priv));
     return RB_SUCCESS;
 }
 
@@ -372,6 +392,7 @@ ringbuf_ret_t ringbuf_sec_write_stream(ringbuf_t *priv, ringbuf_pub_t *pub, cons
  */
 static ringbuf_ret_t ringbuf_sec_read_impl(ringbuf_t *priv, ringbuf_pub_t *pub, void *buf, size_t size,
                                            bool stream_mode, size_t *size_out) {
+    rb_debug("sec_read start. size: %zu, avail: %zu\n", size, ringbuf_available(priv));
     if (!(priv->flags & RINGBUF_FLAG_BLOCKING)) {
         // Flush pos_end from public struct
         priv->pos_end = pub->pos_end_untrusted;
@@ -413,6 +434,7 @@ static ringbuf_ret_t ringbuf_sec_read_impl(ringbuf_t *priv, ringbuf_pub_t *pub, 
     if (size_out)
         *size_out = size;
 
+    rb_debug("sec_read end. size: %zu, avail: %zu\n", size, ringbuf_available(priv));
     return RB_SUCCESS;
 }
 
