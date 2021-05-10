@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2019 Shawn Anastasio
+ * Copyright 2018-2021 Shawn Anastasio
  *
  * This file is part of libkvmchan.
  *
@@ -35,6 +35,9 @@
 
 #include "ipc.h"
 #include "util.h"
+
+#define ipc_debug(fmt, ...)
+//#define ipc_debug(fmt, ...) log(LOGL_INFO, "ipcdbg: "fmt, __VA_ARGS__)
 
 struct dispatcher_data {
     bool is_server;
@@ -626,6 +629,17 @@ fail:
     return false;
 }
 
+__maybe_unused static const char *ipc_dest_str(uint8_t dest) {
+    switch (dest) {
+        case IPC_DEST_MAIN: return "IPC_DEST_MAIN";
+        case IPC_DEST_IVSHMEM: return "IPC_DEST_IVSHMEM";
+        case IPC_DEST_LIBVIRT: return "IPC_DEST_LIBVIRT";
+        case IPC_DEST_VFIO: return "IPC_DEST_VFIO";
+        case IPC_DEST_LOCALHANDLER: return "IPC_DEST_LOCALHANDLER";
+    }
+    return "???";
+}
+
 /**
  * Queue a message for delivery
  * @param msg  ipc message to insert into queue
@@ -646,9 +660,15 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
         return false;
     }
 
+    ipc_debug("sent %s{src=%s, dest=%s, cmd=%ld, id=%d}", msg_h->type ? "RESP" : "CMD",
+              ipc_dest_str(msg_h->src), ipc_dest_str(msg_h->dest), msg_h->cmd.command,
+              msg_h->type ? msg_h->id : id);
+
     // If no response was requested, return
     if (!response || !(msg->flags & IPC_FLAG_WANTRESP))
         return true;
+
+    ipc_debug("wait {id=%d}", id);
 
     // If a response was requested, block until it is received.
     struct response *resp = get_response(&g_ipc_data.receiver_data, id);
@@ -658,6 +678,7 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
     }
 
     // Lock response struct
+    ipc_debug("wait_valid {id=%d}", id);
     ASSERT(!pthread_mutex_lock(&resp->mutex));
 
     // If the response is already valid, just return it
@@ -667,6 +688,7 @@ bool ipc_send_message(struct ipc_message *msg, struct ipc_message *response) {
     // Wait for response to become valid
     ASSERT(!pthread_cond_wait(&resp->cond, &resp->mutex));
     ASSERT(resp->message_valid);
+    ipc_debug("wait_done {id=%d}", id);
 
 out:
     memcpy(response, &resp->message, sizeof(struct ipc_message));
