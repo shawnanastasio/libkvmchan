@@ -1,0 +1,47 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: deps
+      run: sudo apt-get install -y libvirt-dev check
+
+    - name: Download Coverity Build Tool
+      run: |
+        wget -q https://scan.coverity.com/download/linux64 --post-data "token=$TOKEN&project=shawnanastasio%2Flibkvmchan" -O cov-analysis-linux64.tar.gz
+        mkdir cov-analysis-linux64
+        tar xzf cov-analysis-linux64.tar.gz --strip 1 -C cov-analysis-linux64
+      env:
+        TOKEN: ${{ secrets.COVERITY_SCAN_TOKEN }}
+
+    - name: make
+      run: |
+        export PATH=`pwd`/cov-analysis-linux64/bin:$PATH
+        cov-build --dir cov-int make
+
+    - name: make test
+      run: make test
+
+    - name: Upload coverity results
+      run: |
+        tar czvf libkvmchan.tgz cov-int
+        curl \
+          --form token=$TOKEN \
+          --form email=shawnanastasio@yahoo.com \
+          --form file=@libkvmchan.tgz \
+          --form version=master \
+          --form description="`git rev-parse HEAD`" \
+          https://scan.coverity.com/builds?project=shawnanastasio%2Flibkvmchan
+      env:
+        TOKEN: ${{ secrets.COVERITY_SCAN_TOKEN }}
+
