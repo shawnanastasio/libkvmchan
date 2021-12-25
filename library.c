@@ -437,7 +437,7 @@ out_fail_malloc_ret:
     free(ret);
     ret = NULL;
 out:
-    pthread_mutex_unlock(&g_state.mutex);
+    assert(!pthread_mutex_unlock(&g_state.mutex));
     return ret;
 }
 
@@ -559,7 +559,7 @@ out_fail_malloc_ret:
     free(ret);
     ret = NULL;
 out:
-    pthread_mutex_unlock(&g_state.mutex);
+    assert(!pthread_mutex_unlock(&g_state.mutex));
     return ret;
 }
 
