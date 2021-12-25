@@ -308,60 +308,6 @@ START_TEST(ringbuf_relative_test) {
 }
 END_TEST
 
-void *ringbuf_eventfd_test_host_thread(void *rb) {
-    // Sleep 0.2s and write a byte to the rb
-    usleep(200 * 1000);
-    uint8_t buf[1] = {0xAA};
-
-    if (ringbuf_write(rb, buf, 1) != RB_SUCCESS)
-        return "Failed to write to ringbuffer!";
-
-    return NULL;
-}
-
-void *ringbuf_eventfd_test_client_thread(void *rb) {
-    // Wait for the eventfd to signal available bytes
-    int fd = ringbuf_get_eventfd(rb);
-    if (fd < 0)
-        return "Failed to obtain eventfd!";
-
-    // Block on it until data is ready
-    uint8_t buf[8];
-    if (read(fd, buf, 8) < 0)
-        return "Read failed!";
-
-    ringbuf_clear_eventfd(rb);
-
-    // Read from ringbuf
-    if (ringbuf_read(rb, buf, 1) != RB_SUCCESS)
-        return "Failed to read from ringbuf!";
-
-    if (buf[0] != 0xAA)
-        return "Invalid value read from ringbuf!";
-
-    return NULL;
-}
-
-// Make sure eventfd notifications work
-START_TEST(ringbuf_eventfd_test) {
-    ringbuf_t rb;
-    uint8_t rb_buf[10 + 1];
-    ck_assert(ringbuf_init(&rb, rb_buf, 10 + 1, RINGBUF_FLAG_BLOCKING,
-                           RINGBUF_DIRECTION_LOCAL, eventfd(0, 0), -1) == RB_SUCCESS);
-
-    pthread_t host_thread, client_thread;
-    void *host_ret, *client_ret;
-    ck_assert(!pthread_create(&host_thread, NULL, ringbuf_eventfd_test_host_thread, &rb));
-    ck_assert(!pthread_create(&client_thread, NULL, ringbuf_eventfd_test_client_thread, &rb));
-    pthread_join(host_thread, &host_ret);
-    pthread_join(client_thread, &client_ret);
-
-    // The threads will return NULL on success or a string error message on fail.
-    ck_assert_msg(!host_ret, "Host thread failed: %s", (const char *)host_ret);
-    ck_assert_msg(!client_ret, "Client thread failed: %s", (const char *)client_ret);
-}
-END_TEST
-
 // Make sure we can init and infer sec ring buffers
 START_TEST(ringbuf_sec_init_infer_test) {
     ringbuf_t rb;
@@ -517,7 +463,6 @@ Suite *ringbuf_test_suite(void) {
     tcase_add_test(tc_feature, ringbuf_blocking_write_test);
     tcase_add_test(tc_feature, ringbuf_blocking_read_test);
     tcase_add_test(tc_feature, ringbuf_relative_test);
-    tcase_add_test(tc_feature, ringbuf_eventfd_test);
     suite_add_tcase(s, tc_feature);
 
     TCase *tc_sec = tcase_create("sec");
